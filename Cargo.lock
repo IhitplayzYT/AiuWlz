@@ -5,3 +5,55 @@ version = 4
 [[package]]
 name = "AiuWlz"
 version = "0.1.0"
+
+[[package]]
+name = "Algorithms"
+version = "0.1.0"
+
+[[package]]
+name = "Dataloader"
+version = "0.1.0"
+
+[[package]]
+name = "Encoders"
+version = "0.1.0"
+
+[[package]]
+name = "MachineLearnModels"
+version = "0.1.0"
+
+[[package]]
+name = "Maths"
+version = "0.1.0"
+
+[[package]]
+name = "Metrics"
+version = "0.1.0"
+
+[[package]]
+name = "ModelSaveLoad"
+version = "0.1.0"
+
+[[package]]
+name = "NeuralNets"
+version = "0.1.0"
+
+[[package]]
+name = "Optimisers"
+version = "0.1.0"
+
+[[package]]
+name = "Serving"
+version = "0.1.0"
+
+[[package]]
+name = "Tensors"
+version = "0.1.0"
+
+[[package]]
+name = "Transforms"
+version = "0.1.0"
+
+[[package]]
+name = "Utilities"
+version = "0.1.0"

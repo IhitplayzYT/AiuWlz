@@ -1,3 +1,20 @@
+[workspace]
+members = [
+    "src/crates/Algorithms",
+    "src/crates/Dataloader",
+    "src/crates/Encoders",
+    "src/crates/MachineLearnModels",
+    "src/crates/Maths",
+    "src/crates/Metrics",
+    "src/crates/ModelSaveLoad",
+    "src/crates/NeuralNets",
+    "src/crates/Optimisers",
+    "src/crates/Serving",
+    "src/crates/Tensors",
+    "src/crates/Transforms",
+    "src/crates/Utilities",
+]
+
 [package]
 name = "AiuWlz"
 description = ""
