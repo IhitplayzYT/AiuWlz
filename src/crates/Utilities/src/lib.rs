@@ -73,6 +73,7 @@ use crate::device::Device::Device;
         fn Empty(&self) -> Self;
         fn Eye(&self) -> Self;
         fn Arange(&self,range: (T,T,T)) -> Self;
+        fn Random(&self,dim: &[usize],seed: u64) -> Self;
     }
 
 

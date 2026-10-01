@@ -49,6 +49,9 @@ version = "0.1.0"
 [[package]]
 name = "Tensors"
 version = "0.1.0"
+dependencies = [
+ "Utilities",
+]
 
 [[package]]
 name = "Transforms"
