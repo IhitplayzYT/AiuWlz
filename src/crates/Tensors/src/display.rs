@@ -1,5 +1,5 @@
 use crate::dtype::Element;
-use crate::tensor::Tensor::Tensor;
+use crate::tensor::Tensor;
 use std::fmt::{self, Display};
 
 const EDGE: usize = 3;

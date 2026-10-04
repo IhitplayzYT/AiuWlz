@@ -1,5 +1,5 @@
 use std::fmt::{Debug, Display};
-use std::ops::{Add, Div, Mul, Neg, Sub};
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 /// Extra bounds an element needs to live in CUDA memory. Empty without the `cuda` feature.
 #[cfg(feature = "cuda")]
@@ -11,9 +11,8 @@ impl<T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits + Unpin> De
 pub trait DeviceElem {}
 #[cfg(not(feature = "cuda"))]
 impl<T> DeviceElem for T {}
-
 // Done to support uint
-pub trait _Element: Copy + Send + Sync + 'static + PartialOrd + Debug + Display + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + DeviceElem{
+pub trait _Element: Copy + Send + Sync + 'static + PartialOrd + Debug + Display + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + DeviceElem + AddAssign<Self> + SubAssign<Self> + MulAssign<Self> + DivAssign<Self> {
     const NAME: &'static str;
     const CUDA_TYPE: Option<&'static str>;
     fn zero() -> Self;
@@ -22,7 +21,6 @@ pub trait _Element: Copy + Send + Sync + 'static + PartialOrd + Debug + Display 
     fn highest() -> Self;
     fn from_f64(v: f64) -> Self;
     fn to_f64(self) -> f64;
-
 }
 
 pub trait Element: _Element + Neg<Output = Self>{
@@ -30,8 +28,6 @@ pub trait Element: _Element + Neg<Output = Self>{
         if self < Self::zero() { -self } else { self }
     }
 }
-
-
 
 
 pub trait Float: Element {
@@ -94,6 +90,7 @@ macro_rules! impl_int {
     };
 }
 
+
 macro_rules! impl_uint {
     ($t:ty, $name:expr) => {
         impl _Element for $t {
@@ -118,8 +115,10 @@ impl_uint!(u8,"u8");
 impl_uint!(u16,"u16");
 impl_uint!(u32,"u32");
 impl_uint!(u64,"u64");
+impl_uint!(usize,"usize");
 
 impl_int!(i8, "i8");
 impl_int!(i16, "i16");
 impl_int!(i32, "i32");
 impl_int!(i64, "i64");
+impl_int!(isize, "isize");

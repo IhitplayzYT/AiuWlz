@@ -15,6 +15,7 @@ pub mod Device{
         pub fn is_cuda(&self) -> bool {
             matches!(self, Device::Cuda(_))
         }
+
     }
 
     impl fmt::Display for Device {
