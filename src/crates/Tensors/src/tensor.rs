@@ -198,8 +198,8 @@ impl<T: Element> Tensor<T> {
         Ok(self.host_data()?.to_vec()) 
     }
 
-    // Internal use
-    fn item(&self) -> Result<T> {
+    /// Returns the item in a Scalar or unit Tensor
+    pub fn item(&self) -> Result<T> {
         if self.numel() != 1 { return Err(TensorError::InvalidShape(format!("Item needs 1 elem, tensor has {:?}", self.shape())));}
         Ok(self.host_data()?[0])
     }

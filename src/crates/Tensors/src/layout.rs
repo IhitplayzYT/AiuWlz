@@ -43,19 +43,12 @@ pub fn normalize_dim_inclusive(dim: isize, ndim: usize) -> TensorResult<usize> {
 pub fn broadcast_shapes(a: &[usize], b: &[usize]) -> TensorResult<Vec<usize>> {
     let n = a.len().max(b.len());
     let mut out = vec![0; n];
+    let (la,lb) = (a.len(),b.len());
     for i in 0..n {
-        // The extra elems are init to 1
-        let da = if i < n - a.len() { 1 } else { a[i - (n - a.len())] };
-        let db = if i < n - b.len() { 1 } else { b[i - (n - b.len())] };
-        out[i] = if da == db {
-            da
-        } else if da == 1 {
-            db
-        } else if db == 1 {
-            da
-        } else {
-            return Err(TensorError::ShapeMismatch {op: "Tensor broadcats",lhs: a.to_vec(),rhs: b.to_vec()});
-        };
+        // The extra dims are init to 1
+        let da = if i < n - la { 1 } else { a[i - (n - la)] };
+        let db = if i < n - lb { 1 } else { b[i - (n - lb)] };
+        out[i] = if da == db || db == 1 {da} else if da == 1 {db} else {return Err(TensorError::ShapeMismatch {op: "Tensor broadcats",lhs: a.to_vec(),rhs: b.to_vec()});};
     }
     Ok(out)
 }
@@ -164,7 +157,8 @@ impl Layout {
         Ok(out)
     }
 
-    /// Selects a elem in dim and removes the entire dim from the retunred layout
+    /// From the selected dim take the index th elem and remove that dim 
+    /// eg : dim= 3 x 2 x 4  we so select(2,1) we are doing is selecting 2nd dim i.e [,,4] and from this array remove the 1st elem in the dim i.e 4th dim willl have 0,2,3 since 1th elem from that dim is removed
     pub fn select(&self, dim: usize, index: usize) -> TensorResult<Layout> {
         let mut l = self.narrow(dim, index, 1)?;
         l.shape.remove(dim);

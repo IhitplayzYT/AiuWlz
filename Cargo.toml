@@ -1,5 +1,5 @@
 [workspace]
-members = [
+members = ["src/crates/Activations",
     "src/crates/Algorithms",
     "src/crates/Dataloader",
     "src/crates/Encoders",
@@ -13,6 +13,7 @@ members = [
     "src/crates/Tensors",
     "src/crates/Transforms",
     "src/crates/Utilities",
+    "src/crates/Activations",
 ]
 
 [package]

@@ -9,6 +9,7 @@ pub enum TensorError {
     DeviceMismatch { lhs: Device, rhs: Device },
     Unsupported(String),
     Cuda(String),
+    Custom(String)
 }
 
 pub type TensorResult<T> = std::result::Result<T, TensorError>;
@@ -25,6 +26,7 @@ impl fmt::Display for TensorError {
             TensorError::DeviceMismatch { lhs, rhs } => {write!(f, "Device mismatch: {lhs} != {rhs}")}
             TensorError::Unsupported(s) => write!(f, "Unsupported: {s}"),
             TensorError::Cuda(s) => write!(f, "Cuda error: {s}"),
+            TensorError::Custom(s) => write!(f, "Error: {s}"),
         }
     }
 }

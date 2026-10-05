@@ -76,7 +76,12 @@ use crate::device::Device::Device;
         fn Random(&self,dim: &[usize],seed: u64) -> Self;
     }
 
-
+    pub enum Quartile{
+        Q1,
+        Q2,
+        Q3,
+        Q(u8)
+    }
 
 
 

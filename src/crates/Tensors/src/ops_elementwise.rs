@@ -84,6 +84,9 @@ impl<T: Element> Tensor<T> {
         }
     }
 
+    /// No of elems
+    pub fn count(&self) -> usize{ self.numel()}
+
     /// Element wise Negation 
     pub fn neg(&self) -> TensorResult<Self> { 
         self.unary_with(UnaryOp::Neg, |x| -x) 
@@ -137,6 +140,16 @@ impl<T: Element> Tensor<T> {
     /// Element wise relu 
     pub fn relu(&self) -> TensorResult<Self> {
         self.unary_with(UnaryOp::Relu, |x| if x > T::zero() { x } else { T::zero() })
+    }
+
+    /// Thresholding for floating point eq comparisons
+    pub fn thresh_eq_t(&self,rhs: &Self,thresh: Option<T>) -> TensorResult<Self>{
+        self.zip_with(rhs, BinaryOp::Eq, |a, b| if (a-b).abs() <= thresh.unwrap_or(T::from_f64(0.01)) { T::one() } else { T::zero() })
+    }
+
+    /// Thresholding for floating point neq comparisons
+    pub fn thresh_neq_t(&self,rhs: &Self,thresh: Option<T>) -> TensorResult<Self>{
+        self.zip_with(rhs, BinaryOp::Eq, |a, b| if (a-b).abs() > thresh.unwrap_or(T::from_f64(0.01)) { T::one() } else { T::zero() })
     }
 
     /// Equals to 

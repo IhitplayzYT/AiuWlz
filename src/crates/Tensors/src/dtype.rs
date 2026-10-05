@@ -21,6 +21,23 @@ pub trait _Element: Copy + Send + Sync + 'static + PartialOrd + Debug + Display 
     fn highest() -> Self;
     fn from_f64(v: f64) -> Self;
     fn to_f64(self) -> f64;
+    fn max(self,other: Self) -> Self{
+        if self.ge(&other){
+            self
+        }else{
+            other
+        }
+    }
+    fn min(self,other: Self) -> Self{
+        if self.le(&other){
+            self
+        }else{
+            other
+        }
+    }
+    fn clamp(self,lb: Self,ub:Self) -> Self{
+        lb.max(self.min(ub))
+    }
 }
 
 pub trait Element: _Element + Neg<Output = Self>{
