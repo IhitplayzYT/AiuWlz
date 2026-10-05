@@ -7,7 +7,7 @@ pub struct Layout {
     offset: usize,
 }
 
-// Get strides array from shape for contigious block 
+/// Get strides array from shape for contigious block 
 // eg : [3,4] -> [4,1] i.e to move in 1st dim we need to move by 4 mem blocks and to move in 2nd dim we need to move 1 mem block
 pub fn contiguous_strides(shape: &[usize]) -> Vec<isize> {
     let mut strides = vec![0isize; shape.len()];
@@ -19,7 +19,7 @@ pub fn contiguous_strides(shape: &[usize]) -> Vec<isize> {
     strides
 }
 
-// Handle the -tve indexing in dims
+/// Handle the -tve indexing in dims
 pub fn normalize_dim(dim: isize, ndim: usize) -> TensorResult<usize> {
     let n = ndim as isize;
     if dim >= -n && dim < n {
@@ -29,7 +29,7 @@ pub fn normalize_dim(dim: isize, ndim: usize) -> TensorResult<usize> {
     }
 }
 
-// Like normalize_dim but allows dim = ndim for unsqueeze op
+/// Like normalize_dim but allows dim = ndim for unsqueeze op
 pub fn normalize_dim_inclusive(dim: isize, ndim: usize) -> TensorResult<usize> {
     let n = ndim as isize + 1;
     if dim >= -n && dim < n {
@@ -39,7 +39,7 @@ pub fn normalize_dim_inclusive(dim: isize, ndim: usize) -> TensorResult<usize> {
     }
 }
 
-// Tensor broadcasting during any ops 
+/// Tensor broadcasting during any ops 
 pub fn broadcast_shapes(a: &[usize], b: &[usize]) -> TensorResult<Vec<usize>> {
     let n = a.len().max(b.len());
     let mut out = vec![0; n];
@@ -61,23 +61,30 @@ pub fn broadcast_shapes(a: &[usize], b: &[usize]) -> TensorResult<Vec<usize>> {
 }
 
 impl Layout {
+    /// Make a contigious layout
     pub fn contiguous(shape: &[usize]) -> Self {
         Layout { shape: shape.to_vec(), strides: contiguous_strides(shape), offset: 0 }
     }
 
+    /// Make a Arbitrary layout
     pub fn new(shape: Vec<usize>, strides: Vec<isize>, offset: usize) -> TensorResult<Self> {
         if shape.len() != strides.len() {
             return Err(TensorError::InvalidShape(format!("Shape {:?} and Strides {:?} of diff dim",shape, strides)));
         }
         Ok(Layout { shape, strides, offset })
     }
-
+    /// Get layout shape
     pub fn shape(&self) -> &[usize] { &self.shape }
+    /// Get layout strides 
     pub fn strides(&self) -> &[isize] { &self.strides }
+    /// Get layout offset 
     pub fn offset(&self) -> usize { self.offset }
+    /// Get layout ndim 
     pub fn ndim(&self) -> usize { self.shape.len() }
+    /// Get no of elem in a layout  
     pub fn numel(&self) -> usize { self.shape.iter().product() }
 
+    /// Check if a layout is contigious
     pub fn is_contiguous(&self) -> bool {
         let mut expected = 1isize;
         for (&s, &st) in self.shape.iter().zip(&self.strides).rev() {
@@ -89,6 +96,7 @@ impl Layout {
         true
     }
 
+    /// Reshape a layout
     pub fn reshape(&self, new_shape: &[usize]) -> TensorResult<Layout> {
         if new_shape.iter().product::<usize>() != self.numel() {
             return Err(TensorError::InvalidShape(format!("Inconsistent layout {:?} cannot reshape into {:?}",self.shape, new_shape)));
@@ -100,8 +108,9 @@ impl Layout {
     }
 
 
-    // Takes a 0 indexed array containing all elems till n-1
-    // And then based on the value at that idx convertes the shape[idx] and layout[idx] to shape[dims[idx]] and layout[dims[idx]]
+    /// Takes a 0 indexed array containing all elems till n-1
+    /// And then based on the value at that idx convertes the shape[idx] and layout[idx] to shape[dims[idx]] and layout[dims[idx]]
+    /// Reorders layout shape and strides based on dims provided
     pub fn permute(&self, dims: &[usize]) -> TensorResult<Layout> {
         let n = self.ndim();
         let mut seen = vec![false; n];
@@ -111,7 +120,7 @@ impl Layout {
         Ok(Layout {shape: dims.iter().map(|&d| self.shape[d]).collect(),strides: dims.iter().map(|&d| self.strides[d]).collect(),offset: self.offset})
     }
 
-    // Swaps d0 with d1
+    /// Transpose along d0  and d1
     pub fn transpose(&self, d0: usize, d1: usize) -> TensorResult<Layout> {
         let mut dims: Vec<usize> = (0..self.ndim()).collect();
         if d0 >= dims.len() || d1 >= dims.len() {
@@ -121,12 +130,10 @@ impl Layout {
         self.permute(&dims)
     }
 
+    /// Creates a new reshaped Layout according to target shape
     pub fn broadcast_to(&self, target: &[usize]) -> TensorResult<Layout> {
         let (n,nd) = (target.len(),self.ndim());
-        if n < nd {
-            return Err(TensorError::ShapeMismatch { op: "Broadcast to", lhs: self.shape.clone(), rhs: target.to_vec() });
-        }
-
+        if n < nd { return Err(TensorError::ShapeMismatch { op: "Broadcast to", lhs: self.shape.clone(), rhs: target.to_vec() });}
         let extra = n - nd;
         let mut strides = vec![0isize; n];
         for i in 0..n {
@@ -137,8 +144,7 @@ impl Layout {
                 if s == target[i] {
                     strides[i] = st;
                 } else if s == 1 {
-                    // shape == 1 means no stride
-                    strides[i] = 0;
+                    strides[i] = 0; // shape == 1 means no stride
                 } else {
                     return Err(TensorError::ShapeMismatch { op: "Broadcast to", lhs: self.shape.clone(), rhs: target.to_vec() });
                 }
@@ -147,11 +153,9 @@ impl Layout {
         Ok(Layout { shape: target.to_vec(), strides, offset: self.offset })
     }
 
-    // Slice along dim, from st to st+l
+    /// Slice along dim, from st to st+l
     pub fn narrow(&self, dim: usize, st: usize, l: usize) -> TensorResult<Layout> {
-        if dim >= self.ndim() || st + l > self.shape[dim] {
-            return Err(TensorError::InvalidShape(format!("Narrow(dim={dim}, start={st}, len={l}) out of bounds for {:?}",self.shape)));
-        }
+        if dim >= self.ndim() || st > self.shape[dim] || l > self.shape[dim] - st { return Err(TensorError::InvalidShape(format!("Narrow(dim={dim}, start={st}, len={l}) out of bounds for {:?}",self.shape))); }
         let mut out = self.clone();
         out.shape[dim] = l;
         if l > 0 {
@@ -160,7 +164,7 @@ impl Layout {
         Ok(out)
     }
 
-    /// i.e [[1,2,3],[2,3,4],[5,6,7]] using dim=2 and index = 2 means we select elem[2][2]
+    /// Selects a elem in dim and removes the entire dim from the retunred layout
     pub fn select(&self, dim: usize, index: usize) -> TensorResult<Layout> {
         let mut l = self.narrow(dim, index, 1)?;
         l.shape.remove(dim);
@@ -168,7 +172,7 @@ impl Layout {
         Ok(l)
     }
 
-    // Adds a new dim with size 1
+    /// Adds a new dim with size 1
     pub fn unsqueeze(&self, dim: usize) -> Layout {
         let mut out = self.clone();
         let st = if dim < out.ndim() { out.strides[dim] * out.shape[dim] as isize } else { 1 };
@@ -177,8 +181,8 @@ impl Layout {
         out
     }
 
+    /// Removes the dim if dim have a singular elem
     pub fn squeeze(&self, dim: usize) -> TensorResult<Layout> {
-        // We want to remove dim if only dim has len 1
         if dim >= self.ndim() || self.shape[dim] != 1 { return Err(TensorError::InvalidShape(format!("Cannot squeeze dim:{dim} of {:?}", self.shape)));}
         let mut out = self.clone();
         out.shape.remove(dim);
@@ -186,7 +190,7 @@ impl Layout {
         Ok(out)
     }
 
-    /// Reverse iter of dim
+    /// Reverse iteration view of dim by altering strides in retunred layout
     pub fn flip(&self, dim: usize) -> TensorResult<Layout> {
         if dim >= self.ndim() { return Err(TensorError::InvalidDim { dim: dim as isize, ndim: self.ndim() });}
         let mut out = self.clone();
@@ -194,11 +198,11 @@ impl Layout {
         if self.shape[dim] > 0 {
             out.offset = (self.offset as isize + (self.shape[dim] as isize - 1) * self.strides[dim]) as usize;
         }
-        // negativ stride to iter along dim in rev
+        // negative stride to iter along dim in rev
         out.strides[dim] = -self.strides[dim];
         Ok(out)
     }
-
+    
     pub fn offsets(&self) -> StridedIter {
         StridedIter {shape: self.shape.clone(),strides: self.strides.clone(),idx: vec![0; self.shape.len()],cur: self.offset as isize,rem: self.numel()}
     }

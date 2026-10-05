@@ -38,7 +38,7 @@ pub mod Random{
             (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
         }
 
-        // normal distrib using box Muller
+        // Normal distrib using box Muller
         pub fn normal(&mut self) -> f64 {
             let u1 = self.uniform().max(f64::MIN_POSITIVE); // Avoid u1 becoming 0 for ln
             let u2 = self.uniform();
