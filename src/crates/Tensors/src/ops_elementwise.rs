@@ -11,34 +11,10 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 pub enum UnaryOp { Neg, Abs, Exp, Ln, Sqrt, Sin, Cos, Tanh, Sigmoid, Relu, Recip, Square, Gelu, Floor, Ceil }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BinaryOp { Add, Sub, Mul, Div, Max, Min, Eq, Gt, Lt, Ge, Le, Pow }
+pub enum BinaryOp { Add, Sub, Mul, Div, Max, Min, Eq, Neq, Gt, Lt, Ge, Le, Pow }
 
 
-pub trait IntLike{}
-pub trait FloatLike{}
-pub trait SignedLike{}
 
-impl IntLike for i8{}
-impl IntLike for i16{}
-impl IntLike for i32{}
-impl IntLike for i64{}
-impl IntLike for isize{}
-impl IntLike for u8{}
-impl IntLike for u16{}
-impl IntLike for u32{}
-impl IntLike for u64{}
-impl IntLike for usize{}
-
-impl FloatLike for f32{}
-impl FloatLike for f64{}
-
-impl SignedLike for i8{}
-impl SignedLike for i16{}
-impl SignedLike for i32{}
-impl SignedLike for i64{}
-impl SignedLike for isize{}
-impl SignedLike for f32{}
-impl SignedLike for f64{}
 
 
 impl<T: Element> Tensor<T> {
@@ -159,7 +135,7 @@ impl<T: Element> Tensor<T> {
 
     /// Not Equals to 
     pub fn neq_t(&self, rhs: &Self) -> TensorResult<Self> {
-        self.zip_with(rhs, BinaryOp::Eq, |a, b| if a != b { T::one() } else { T::zero() })
+        self.zip_with(rhs, BinaryOp::Neq, |a, b| if a != b { T::one() } else { T::zero() })
     }
 
     /// Greater than 
@@ -249,6 +225,23 @@ impl<T: Element> Tensor<T> {
         mask.where_cond(self, &self.zeros_like())
     }
 
+    /// Internal helper
+    fn logic_reduce(&self,f: impl FnMut(T) -> bool,all:bool) -> TensorResult<bool>{
+        let k = self.to_vec()?;
+        if all{
+            Ok(k.into_iter().all(f))
+        }else{
+            Ok(k.into_iter().any(f))
+        }
+    }
+
+    /// Applies All on Tensor
+    pub fn all(&self,f: impl FnMut(T) -> bool) -> TensorResult<bool>{self.logic_reduce(f, true)}
+
+    /// Applies Any on Tensor
+    pub fn any(&self,f: impl FnMut(T) -> bool) -> TensorResult<bool>{self.logic_reduce(f, false)}
+
+
     /// Lower triangle below shifted alternate diagonal [0 to get normal]
     pub fn alt_tril(&self, diagonal: isize) -> TensorResult<Self> { self._tri_alt(diagonal, true) }
 
@@ -323,9 +316,71 @@ impl<T: Float> Tensor<T> {
         })
     }
 
+    /// Tanhshrink
+    /// x - tanh(x)
+    pub fn tanhshrink(&self) -> TensorResult<Self> { self.sub(&self.tanh()?)}
+
+
+    /// Hardsigmoid
+    /// clamp((x + 1)/2, 0, 1)
+    pub fn hardsigmoid(&self) -> TensorResult<Self> { self.add(&self.ones_like())?.div_scalar(T::from_f64(2.0))?.clamp(T::zero(), T::one())}
+
+    /// Hardtanh
+    /// clamp(x,min,max)
+    pub fn hardtanh(&self,min:T,max:T) -> TensorResult<Self>{self.clamp(min,max)}
+
+
+    /// Hardshrink
+    /// x < -lambda ? x :(x > lambda ? x: 0) 
+    pub fn hardshrink(&self,lambda:T) -> TensorResult<Self> { 
+        if self.all(|x| x < lambda.neg())?{
+            Ok(self.clone())
+        }else{
+           if self.all(|x| x < lambda)? {
+                Ok(self.clone())
+           }else{
+                Ok(self.zeros_like())
+           }
+        }
+    }
+
     /// Silu/Swish     
+    /// x * sigmoid(x)
     pub fn silu(&self) -> TensorResult<Self> {self.mul(&self.sigmoid()?)}
     pub fn swish(&self) -> TensorResult<Self> {self.silu()}
+
+    /// SELU
+    /// λ * (x > 0 ? x : α(exp(x)-1))
+    pub fn selu(&self,lambda:T,alpha:T) -> TensorResult<Self>{
+        if self.all(|x| x > T::zero())?{
+            Ok(self.mul_scalar(lambda)?)
+        }else{
+            Ok(self.exp()?.sub(&self.ones_like()).mul_scalar(alpha)?.mul_scalar(lambda)?)
+        }
+    }
+
+    /// Softplus
+    /// ln(1 + e^x)
+    pub fn softplus(&self) -> TensorResult<Self>{Ok(self.ones_like().add(&self.exp()?).ln()?)}
+
+    /// Softsign
+    /// ln(1 + e^x)
+    pub fn softsign(&self) -> TensorResult<Self>{ self.div(&self.ones_like().add(&self.abs()?)) }   
+
+    /// Mish
+    /// x * tanh(softplus(x))
+    pub fn mish(&self) -> TensorResult<Self> { self.mul(&self.softplus()?.tanh()?)}
+
+    /// Elu
+    /// if x > 0 ? x : alpha * (e^x - 1)
+    pub fn  elu(&self,alpha:T) -> TensorResult<Self>{
+        if self.gt(&self.ones_like())?.all(|x| x > T::zero())?{
+            Ok(self.clone())
+        }else{
+            Ok(self.exp()?.sub(&self.ones_like()).mul_scalar(alpha)?)
+        }
+    }
+
 
     /// Leaky Relu
     pub fn lrelu(&self, alpha: T) -> TensorResult<Self> {

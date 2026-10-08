@@ -271,20 +271,17 @@ impl<T: Float> Tensor<T> {
         c.div(&d_mod.unsqueeze(1)?.mul(&d_mod.unsqueeze(0)?)?)
     }
     pub fn corr_mat(&self) -> TensorResult<Self> { self.corrcoef()}
+    
+    /// Calculate skewness of Tensor
+    pub fn skewness(&self) -> TensorResult<T>{ Ok(self.sub_scalar(self.mean_all()?)?.div_scalar(self.std_all(true)?)?.powi32(3)?.sum_all()?.div(T::from_f64(self.numel() as f64))) }
 
     /// Calculate skewness of Tensor along dim
     pub fn skewness_all(&self,dim:isize,is_sample: bool) -> TensorResult<Tensor<T>>{self.sub(&self.mean(dim, true)?)?.div(&self.std(dim, true, is_sample)?)?.powi32(3)?.div_scalar(T::from_f64(self.numel() as f64))}
-
-    /// Calculate skewness of Tensor
-    pub fn skewness(&self) -> TensorResult<T>{ Ok(self.sub_scalar(self.mean_all()?)?.div_scalar(self.std_all(true)?)?.powi32(3)?.sum_all()?.div(T::from_f64(self.numel() as f64))) }
 
     /// Calculate kurtosis of Tensor along dim
     pub fn kurtosis_all(&self,dim:isize,is_sample: bool) -> TensorResult<Tensor<T>>{self.sub(&self.mean(dim, true)?)?.div(&self.std(dim, true, is_sample)?)?.powi32(4)?.div_scalar(T::from_f64(self.numel() as f64))}
     
     /// Calculate kurtosis of Tensor
     pub fn kurtosis(&self) -> TensorResult<T>{ Ok(self.sub_scalar(self.mean_all()?)?.div_scalar(self.std_all(true)?)?.powi32(4)?.sum_all()?.div(T::from_f64(self.numel() as f64))) }
-
-
-
 
 }

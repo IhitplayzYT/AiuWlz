@@ -1,5 +1,6 @@
 pub mod random;
 pub mod device;
+pub mod misc;
 
 pub mod Utilities{
     // Some trait definations for the numpy based impl of scalars,vectors and matrices

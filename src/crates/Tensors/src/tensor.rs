@@ -146,7 +146,7 @@ impl<T: Float> Tensor<T> {
     /// Create a tensor sampled from normal distrib
     pub fn randn(shape: &[usize], rng: &mut Rng) -> Self {
         Self::from_vec((0..shape.iter().product()).map(|_| T::from_f64(rng.normal())).collect(), shape).unwrap()
-    }
+    }    
 }
 
 impl<T: Element> Tensor<T> {
@@ -173,7 +173,6 @@ impl<T: Element> Tensor<T> {
     /// Get layout of Storage 
     pub fn storage(&self) -> &Storage<T> { &self.storage }
     
-
     /// Get data on a host
     pub fn host_data(&self) -> Result<Cow<'_, [T]>> {
         match &*self.storage {

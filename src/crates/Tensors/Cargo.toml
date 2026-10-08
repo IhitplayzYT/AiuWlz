@@ -3,5 +3,12 @@ name = "Tensors"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["parallel","cuda"]
+parallel = ["dep:rayon"]
+cuda = ["dep:cudarc"]
+
 [dependencies]
 Utilities = { path = "../Utilities" }
+rayon = { version = "1.8", optional = true }
+cudarc = { version = "0.19.10", optional = true, default-features = false, features = [ "std", "driver", "nvrtc", "dynamic-loading", "cuda-version-from-build-system", "fallback-latest"] }
