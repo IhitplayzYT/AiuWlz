@@ -32,3 +32,43 @@ pub fn for_each_row<R: Send>(out: &mut [R], row_len: usize, work_per_row: usize,
     }
     out.chunks_mut(row_len).enumerate().for_each(|(i,r)| f(i, r));
 }
+
+pub fn reduce<T: Sync + Send + Copy, R: Send>(data: &[T], init: R, f: impl Fn(R, T) -> R + Sync + Send) -> R {
+    #[cfg(feature = "parallel")]
+    if data.len() >= MX_PARALLEL {
+        return data.par_iter().fold(|| init, |acc, &x| f(acc, x)).reduce(|| init, |a, b| f(a, b));
+    }
+    data.iter().fold(init, |acc, &x| f(acc, x))
+}
+
+pub fn sort<T: Send + Ord>(data: &mut [T]) {
+    #[cfg(feature = "parallel")]
+    if data.len() >= MX_PARALLEL {
+        data.par_sort();
+        return;
+    }
+    data.sort();
+}
+
+
+pub fn argmin<T: Sync + Send + Copy + PartialOrd>(data: &[T]) -> usize {
+    #[cfg(feature = "parallel")]
+    if data.len() >= MX_PARALLEL {
+        return data.par_chunks(MX_PARALLEL).enumerate().map(|(chunk_idx, chunk)| {
+                let (local_min_idx, _) = chunk.iter().enumerate().min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).unwrap();
+                chunk_idx * MX_PARALLEL + local_min_idx
+            }).min_by(|&a, &b| data[a].partial_cmp(&data[b]).unwrap()).unwrap();
+    }
+    data.iter().enumerate().min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).unwrap().0
+}
+
+pub fn argmax<T: Sync + Send + Copy + PartialOrd>(data: &[T]) -> usize {
+    #[cfg(feature = "parallel")]
+    if data.len() >= MX_PARALLEL {
+        return data.par_chunks(MX_PARALLEL).enumerate().map(|(chunk_idx, chunk)| {
+                let (local_max_idx, _) = chunk.iter().enumerate().max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).unwrap();
+                chunk_idx * MX_PARALLEL + local_max_idx
+            }).max_by(|&a, &b| data[a].partial_cmp(&data[b]).unwrap()).unwrap();
+    }
+    data.iter().enumerate().max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).unwrap().0
+}

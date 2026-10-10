@@ -14,7 +14,7 @@ pub enum ReduceOp { Sum, Max, Min }
 /// Sort a Element array
 fn sorted<T: Element>(s: &[T]) -> Vec<T> {
     let mut v = s.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    crate::par::sort(&mut v);
     v
 }
 
@@ -110,20 +110,12 @@ impl<T: Element> Tensor<T> {
 
     /// Index of the max elem along dim
     pub fn argmax(&self, dim: isize, keepdim: bool) -> TensorResult<Tensor<i64>> {
-        self.reduce_with(dim, keepdim, |s| {
-            let mut best = 0;
-            for (i, &x) in s.iter().enumerate() { if x > s[best] { best = i; } }
-            best as i64
-        })
+        self.reduce_with(dim, keepdim, |s| crate::par::argmax(s) as i64)
     }
-
+    
     /// Index of the min elem along dim
     pub fn argmin(&self, dim: isize, keepdim: bool) -> TensorResult<Tensor<i64>> {
-        self.reduce_with(dim, keepdim, |s| {
-            let mut best = 0;
-            for (i, &x) in s.iter().enumerate() { if x < s[best] { best = i; } }
-            best as i64
-        })
+        self.reduce_with(dim, keepdim, |s| crate::par::argmin(s) as i64)
     }
 
     /// Mean of elems along dim

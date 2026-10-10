@@ -279,9 +279,14 @@ impl<T: Float> Tensor<T> {
 
     /// Normalize over the last dim(mean = 0,var = 1)
     pub fn layer_norm(&self, eps: T) -> TensorResult<Self> {
-        let mean = self.mean(-1, true)?;
-        let var = self.var(-1, true, false)?;
-        self.sub(&mean)?.div(&var.add_scalar(eps)?.sqrt()?)
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let (mean,var) = (self.mean(-1, true)?,self.var(-1, true, false)?);
+                self.sub(&mean)?.div(&var.add_scalar(eps)?.sqrt()?)
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => crate::cuda::layer_norm(self, eps),
+        }
     }
     
     /// Calculate the distance between two Tensors using p dim normalised distance

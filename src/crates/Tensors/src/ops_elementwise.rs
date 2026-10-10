@@ -49,12 +49,13 @@ impl<T: Element> Tensor<T> {
 
     /// Apply binary Scalar Op
     pub fn scalar_op(&self, v: T, op: BinaryOp, f: impl Fn(T, T) -> T + Sync + Send) -> TensorResult<Self> {
-        if self.device().is_cpu() {
-            self.map(move |x| f(x, v))
-        } else {
-            self.zip_with(&self.scalar_like(v)?, op, f)
+        match &*self.storage {
+            Storage::Cpu(_) => self.map(move |x| f(x, v)),
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => crate::cuda::scalar_op(self, v, op as i32),
         }
     }
+    
 
     /// No of elems
     pub fn count(&self) -> usize{ self.numel()}

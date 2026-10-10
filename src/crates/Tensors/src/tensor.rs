@@ -71,11 +71,20 @@ impl<T: Element> Tensor<T> {
     /// Create a new array filled with same elem on Cpu 
     pub fn fill(shape: &[usize], v: T) -> Self {
         let n = shape.iter().product();
+        #[cfg(feature = "cuda")]
+        if T::CUDA_TYPE.is_some() {
+            use crate::cuda::CudaStorage;
+ 
+            return Self::from_comp(
+                Storage::Cuda(CudaStorage::from_host(&crate::cuda::fill(shape, v, 0).unwrap().to_vec().unwrap(),0).unwrap()),
+                Layout::contiguous(shape)
+            );
+        }
         Self::from_comp(Storage::Cpu(vec![v; n]), Layout::contiguous(shape))
     }
 
     /// Create a new array filled with 0/0.0 on Cpu 
-    pub fn zeros(shape: &[usize]) -> Self { Self::fill(shape, T::zero())}
+    pub fn zeros(shape: &[usize]) -> Self {Self::fill(shape, T::zero())}
 
     /// Create a new array filled with 1/1.0 on Cpu 
     pub fn ones(shape: &[usize]) -> Self { Self::fill(shape, T::one()) }
@@ -95,6 +104,8 @@ impl<T: Element> Tensor<T> {
     /// Create a Tensor from a range
     pub fn arange(start: T, end: T, step: T) -> Result<Self> {
         if step == T::zero() { return Err(TensorError::InvalidShape("Step canot be 0".into()));}
+        #[cfg(feature = "cuda")]
+        if T::CUDA_TYPE.is_some() { return crate::cuda::arange(start, end, step, 0);}
         let mut v = Vec::new();
         let mut x = start;
         while (step > T::zero() && x < end) || (step < T::zero() && x > end) {
@@ -131,8 +142,14 @@ impl<T: Element> Tensor<T> {
 }
 
 impl<T: Float> Tensor<T> {
+
     /// Create a n elem tensor on a range
     pub fn linspace(start: T, end: T, steps: usize) -> Self {
+        let step = if steps > 1 { (end - start) / T::from_f64((steps - 1) as f64) } else { T::zero() };
+        #[cfg(feature = "cuda")]
+        if T::CUDA_TYPE.is_some() {
+            return crate::cuda::arange(start, end + step, step, 0).unwrap();
+        }
         let (st, ed) = (start.to_f64(), end.to_f64());
         let v: Vec<T> = (0..steps).map(|i| T::from_f64(st + (ed - st) *  if steps > 1 { i as f64 / (steps - 1) as f64 } else { 0.0 })).collect();
         Self::from_vec(v, &[steps]).unwrap()
