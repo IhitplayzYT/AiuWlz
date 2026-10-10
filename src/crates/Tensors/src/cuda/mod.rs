@@ -3,7 +3,7 @@
 
 mod kernels;
 use Utilities::device::Device::Device;
-use crate::dtype::Element;
+use crate::dtype::{Element, Float};
 use crate::error::{Result, TensorError};
 use crate::layout::Layout;
 use crate::ops_elementwise::{BinaryOp, UnaryOp};
@@ -222,4 +222,131 @@ pub fn reduce<T: Element>(t: &Tensor<T>, dim: usize, op: ReduceOp, keepdim: bool
     unsafe { b.launch(cfg) }.map_err(cu)?;
     let r = wrap(out, c, &out_shape);
     if keepdim { r.unsqueeze(dim as isize) } else { Ok(r) }
+}
+
+pub fn clamp<T: Element>(t: &Tensor<T>, lo: T, hi: T) -> Result<Tensor<T>> {
+    let t = t.compact()?;
+    let c = cstore(&t)?;
+    let n = t.numel();
+    let mut out = alloc(c, n)?;
+    if n > 0 {
+        let f = func::<T>(&c.dev, "clamp_k")?;
+        let mut b = c.dev.stream.launch_builder(&f);
+        b.arg(&mut out).arg(&c.data).arg(&n).arg(&lo).arg(&hi);
+        unsafe { b.launch(LaunchConfig::for_num_elems(n as u32)) }.map_err(cu)?;
+    }
+    Ok(wrap(out, c, t.shape()))
+}
+
+
+pub fn where_cond<T: Element>(cond: &Tensor<T>, a: &Tensor<T>, b: &Tensor<T>, out_shape: &[usize]) -> Result<Tensor<T>> {
+    let cond = cond.broadcast_to(out_shape)?.compact()?;
+    let a = a.broadcast_to(out_shape)?.compact()?;
+    let b = b.broadcast_to(out_shape)?.compact()?;
+    let (cc, ca, cb) = (cstore(&cond)?, cstore(&a)?, cstore(&b)?);
+    let n = cond.numel();
+    let mut out = alloc(cc, n)?;
+    if n > 0 {
+        let f = func::<T>(&cc.dev, "where_k")?;
+        let mut bl = cc.dev.stream.launch_builder(&f);
+        bl.arg(&mut out).arg(&cc.data).arg(&ca.data).arg(&cb.data).arg(&n);
+        unsafe { bl.launch(LaunchConfig::for_num_elems(n as u32)) }.map_err(cu)?;
+    }
+    Ok(wrap(out, cc, out_shape))
+}
+
+pub fn scalar_op<T: Element>(t: &Tensor<T>, scalar: T, op: i32) -> Result<Tensor<T>> {
+    let t = t.compact()?;
+    let c = cstore(&t)?;
+    let n = t.numel();
+    let mut out = alloc(c, n)?;
+    if n > 0 {
+        let f = func::<T>(&c.dev, "scalar_k")?;
+        let mut b = c.dev.stream.launch_builder(&f);
+        b.arg(&mut out).arg(&c.data).arg(&n).arg(&scalar).arg(&op);
+        unsafe { b.launch(LaunchConfig::for_num_elems(n as u32)) }.map_err(cu)?;
+    }
+    Ok(wrap(out, c, t.shape()))
+}
+
+pub fn fill<T: Element>(shape: &[usize], v: T, ordinal: usize) -> Result<Tensor<T>> {
+    let dev = device(ordinal)?;
+    let n = shape.iter().product::<usize>();
+    let mut out = if n > 0 {
+        unsafe {dev.stream.alloc::<T>(n).map_err(cu)?}
+    } else {
+        dev.stream.alloc_zeros::<T>(1).map_err(cu)?
+    };
+    if n > 0 {
+        let f = func::<T>(&dev, "fill_k")?;
+        let mut b = dev.stream.launch_builder(&f);
+        b.arg(&mut out).arg(&n).arg(&v);
+        unsafe { b.launch(LaunchConfig::for_num_elems(n as u32)) }.map_err(cu)?;
+    }
+    let c = CudaStorage { data: out, dev: dev.clone(), ordinal };
+    Ok(Tensor::from_comp(Storage::Cuda(c), Layout::contiguous(shape)))
+}
+
+pub fn arange<T: Element>(start: T, end: T, step: T, ordinal: usize) -> Result<Tensor<T>> {
+    let dev = device(ordinal)?;
+    let mut v = Vec::new();
+    let mut x = start;
+    while (step > T::zero() && x < end) || (step < T::zero() && x > end) {
+        v.push(x);
+        x += step;
+    }
+    let n = v.len();
+    let mut out = unsafe {dev.stream.alloc::<T>(n).map_err(cu)?};
+    if n > 0 {
+        let f = func::<T>(&dev, "arange_k")?;
+        let mut b = dev.stream.launch_builder(&f);
+        b.arg(&mut out).arg(&n).arg(&start).arg(&step);
+        unsafe { b.launch(LaunchConfig::for_num_elems(n as u32)) }.map_err(cu)?;
+    }
+    let c = CudaStorage { data: out, dev, ordinal };
+    Ok(Tensor::from_comp(Storage::Cuda(c), Layout::contiguous(&[n])))
+}
+
+pub fn softmax<T: Float>(t: &Tensor<T>, dim: usize) -> Result<Tensor<T>> {
+    let cols = t.shape()[dim];
+    if cols == 0 || t.numel() == 0 {
+        return t.via_host(|h| h.softmax(dim as isize));
+    }
+    let moved = t.movedim_last(dim)?.compact()?;
+    let c = cstore(&moved)?;
+    let rows = moved.numel() / cols;
+    let mut out = alloc(c, rows * cols)?;
+    const BLOCK: usize = 256;
+    let cfg = LaunchConfig {
+        grid_dim: (((cols + BLOCK - 1) / BLOCK) as u32, rows as u32, 1),
+        block_dim: (BLOCK as u32, 1, 1),
+        shared_mem_bytes: BLOCK as u32 * std::mem::size_of::<T>() as u32 * 2,
+    };
+    let f = func::<T>(&c.dev, "softmax_k")?;
+    let mut b = c.dev.stream.launch_builder(&f);
+    b.arg(&mut out).arg(&c.data).arg(&rows).arg(&cols);
+    unsafe { b.launch(cfg) }.map_err(cu)?;
+    let r = wrap(out, c, moved.shape());
+    r.movedim_last(dim)
+}
+
+pub fn layer_norm<T: Float>(t: &Tensor<T>, eps: T) -> Result<Tensor<T>> {
+    let cols = t.shape()[t.ndim() - 1];
+    if cols == 0 || t.numel() == 0 {
+        return t.via_host(|h| h.layer_norm(eps));
+    }
+    let c = cstore(&t)?;
+    let rows = t.numel() / cols;
+    let mut out = alloc(c, rows * cols)?;
+    const BLOCK: usize = 256;
+    let cfg = LaunchConfig {
+        grid_dim: (((cols + BLOCK - 1) / BLOCK) as u32, rows as u32, 1),
+        block_dim: (BLOCK as u32, 1, 1),
+        shared_mem_bytes: BLOCK as u32 * std::mem::size_of::<T>() as u32 * 2,
+    };
+    let f = func::<T>(&c.dev, "layer_norm_k")?;
+    let mut b = c.dev.stream.launch_builder(&f);
+    b.arg(&mut out).arg(&c.data).arg(&rows).arg(&cols).arg(&eps);
+    unsafe { b.launch(cfg) }.map_err(cu)?;
+    Ok(wrap(out, c, t.shape()))
 }

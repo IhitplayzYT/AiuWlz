@@ -13,10 +13,6 @@ pub enum UnaryOp { Neg, Abs, Exp, Ln, Sqrt, Sin, Cos, Tanh, Sigmoid, Relu, Recip
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinaryOp { Add, Sub, Mul, Div, Max, Min, Eq, Neq, Gt, Lt, Ge, Le, Pow }
 
-
-
-
-
 impl<T: Element> Tensor<T> {
 
     /// Apply Unary op on tensors
@@ -80,7 +76,11 @@ impl<T: Element> Tensor<T> {
 
     /// Element wise clamping 
     pub fn clamp(&self, lo: T, hi: T) -> TensorResult<Self> {
-        self.via_host(|t| t.map(|x| if x < lo { lo } else if x > hi { hi } else { x }))
+        match &*self.storage {
+            Storage::Cpu(_) => self.map(|t| t.map(|x| if x < lo { lo } else if x > hi { hi } else { x })),
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => crate::cuda::clamp(self, lo, hi),
+        }
     }
 
     /// Element wise Addition 
@@ -183,11 +183,19 @@ impl<T: Element> Tensor<T> {
         self.same_device(a)?;
         self.same_device(b)?;
         let shape = broadcast_shapes(&broadcast_shapes(self.shape(), a.shape())?, b.shape())?;
-        let m = self.broadcast_to(&shape)?.to_vec()?;
-        let x = a.broadcast_to(&shape)?.to_vec()?;
-        let y = b.broadcast_to(&shape)?.to_vec()?;
-        let out: Vec<T> = (0..m.len()).map(|i| if m[i] != T::zero() { x[i] } else { y[i] }).collect();
-        Tensor::from_vec(out, &shape)?.to_device(self.device())
+        match (&*self.storage, &*a.storage, &*b.storage) {
+            (Storage::Cpu(_), Storage::Cpu(_), Storage::Cpu(_)) => {
+                let m = self.broadcast_to(&shape)?.to_vec()?;
+                let x = a.broadcast_to(&shape)?.to_vec()?;
+                let y = b.broadcast_to(&shape)?.to_vec()?;
+                let out: Vec<T> = (0..m.len()).map(|i| if m[i] != T::zero() { x[i] } else { y[i] }).collect();
+                Tensor::from_vec(out, &shape)?.to_device(self.device())
+            }
+            #[cfg(feature = "cuda")]
+            (Storage::Cuda(_), Storage::Cuda(_), Storage::Cuda(_)) => crate::cuda::where_cond(self, a, b, &shape),
+            #[cfg(feature = "cuda")]
+            _ => Err(TensorError::DeviceMismatch { lhs: self.device(), rhs: a.device() }),
+        }
     }
 
     fn _tri(&self, diagonal: isize, lower: bool) -> TensorResult<Self> {

@@ -1,5 +1,7 @@
 use crate::dtype::{Element, Float};
 use crate::error::{TensorResult, TensorError};
+#[cfg(feature = "cuda")]
+use crate::layout::normalize_dim;
 use crate::layout::{broadcast_shapes, Layout};
 use crate::par;
 use crate::storage::Storage;
@@ -251,8 +253,14 @@ impl<T: Float> Tensor<T> {
 
     /// Softmax of Tensor
     pub fn softmax(&self, dim: isize) -> TensorResult<Self> {
-        let e = self.sub(&self.max(dim, true)?)?.exp()?;
-        e.div(&e.sum(dim, true)?)
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let e = self.sub(&self.max(dim, true)?)?.exp()?;
+                e.div(&e.sum(dim, true)?)
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => crate::cuda::softmax(self, normalize_dim(dim, self.ndim())?),
+        }
     }
 
     /// Log of sum of base e exponentials stabily 

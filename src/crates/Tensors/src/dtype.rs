@@ -38,6 +38,11 @@ pub trait _Element: Copy + Send + Sync + 'static + PartialOrd + Debug + Display 
     fn clamp(self,lb: Self,ub:Self) -> Self{
         lb.max(self.min(ub))
     }
+
+    fn map(self,f: impl Fn(Self) -> Self ) -> Self{
+        f(self)
+    }
+
 }
 
 pub trait Element: _Element + Neg<Output = Self>{

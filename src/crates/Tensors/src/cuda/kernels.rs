@@ -155,7 +155,7 @@ extern "C" __global__ void reduce_k(T* out, const T* a, size_t cols, int op, T i
     if (threadIdx.x == 0) out[blockIdx.x] = sh[0];
 }
 
-// Parallel Scalar Op
+// Parallel ScalarOp
 extern "C" __global__ void scalar_k(T* out, const T* a, size_t n, T scalar, int op) {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -168,6 +168,108 @@ extern "C" __global__ void scalar_k(T* out, const T* a, size_t n, T scalar, int 
         default: out[i] = pow{S}(x, scalar); break;
     }
 }
+
+// Parallel Fill
+extern "C" __global__ void fill_k(T* out, size_t n, T value) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = value;
+}
+
+// Parallel Scatter
+extern "C" __global__ void scatter_k(T* out, const T* values, const size_t* indices, size_t n) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[indices[i]] = values[i];
+}
+
+// Parallel Gather
+extern "C" __global__ void gather_k(T* out, const T* inp, const size_t* indices, size_t n) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = inp[indices[i]];
+}
+
+
+// Parallel Arange 
+extern "C" __global__ void arange_k(T* out, size_t n, T start, T step) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = start + ((T)i * step);
+}
+
+// Parallel Transpose 
+extern "C" __global__ void transpose_2d_k(T* out, const T* inp, size_t m, size_t n) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x,j = blockIdx.y * (size_t)blockDim.y + threadIdx.y;
+    if (i >= m || j >= n) return;
+    out[j * m + i] = inp[i * n + j];
+}
+
+// Parallel Concat
+extern "C" __global__ void concat_k(T* out, const T* const* inputs, const size_t* offsets, const size_t* sizes, size_t num_inputs, size_t total_elems) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x, input_idx = 0;
+    if (i >= total_elems) return;
+    while (i >= offsets[input_idx + 1] && input_idx < num_inputs - 1) input_idx++;
+    size_t local_idx = i - offsets[input_idx];
+    out[i] = inputs[input_idx][local_idx];
+}
+
+// Parallel Softmax
+extern "C" __global__ void softmax_k(T* out, const T* inp, size_t rows, size_t cols) {
+    size_t row = blockIdx.y * (size_t)blockDim.y + threadIdx.y;
+    size_t col = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (row >= rows || col >= cols) return;
+    
+    extern __shared__ __align__(8) unsigned char smem_raw[];
+    extern __shared__ __align__(8) unsigned char smem_raw2[];
+    T* smax = (T*)smem_raw;
+    T* ssum = (T*)smem_raw2;
+    
+    if (threadIdx.x == 0) {
+        T max_val = inp[row * cols];
+        for (size_t i = 1; i < cols; i++) {
+            if (inp[row * cols + i] > max_val) max_val = inp[row * cols + i];
+        }
+        smax[0] = max_val;
+    }
+    __syncthreads();
+    
+    T exp_val = exp{S}(inp[row * cols + col] - smax[0]);
+    if (threadIdx.x == 0) ssum[0] = (T)0;
+    __syncthreads();
+    
+    atomicAdd(&ssum[0], exp_val);
+    __syncthreads();
+    
+    out[row * cols + col] = exp_val / ssum[0];
+}
+
+// Parallel Z normalisation (x - mean) / std_dev
+extern "C" __global__ void layer_norm_k(T* out, const T* inp, size_t rows, size_t cols, T eps) {
+    size_t row = blockIdx.y * (size_t)blockDim.y + threadIdx.y;
+    size_t col = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (row >= rows || col >= cols) return;
+    
+    extern __shared__ __align__(8) unsigned char smem_raw[];
+    T* smean = (T*)smem_raw;
+    T* svar = (T*)(smem_raw + sizeof(T));
+    
+    if (threadIdx.x == 0) {
+        T sum = (T)0,var = (T)0;
+        for (size_t i = 0; i< cols;i++) sum += inp[row * cols + i];
+        smean[0] = sum / (T)cols;
+
+        for (size_t i = 0; i < cols;++i ) {
+            T x = inp[row * cols + i] - smean[0];
+            var += x*x;
+        }
+        svar[0] = var /(T)cols;
+    }
+    __syncthreads();
+    
+    out[row * cols + col] = (inp[row * cols + col] - smean[0]) / sqrt{S}(svar[0] + eps);
+}
+
 "#;
 
 pub fn source(ctype: &str) -> String {
