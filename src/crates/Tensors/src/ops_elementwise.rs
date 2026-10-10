@@ -125,7 +125,7 @@ impl<T: Element> Tensor<T> {
 
     /// Thresholding for floating point neq comparisons
     pub fn thresh_neq_t(&self,rhs: &Self,thresh: Option<T>) -> TensorResult<Self>{
-        self.zip_with(rhs, BinaryOp::Eq, |a, b| if (a-b).abs() > thresh.unwrap_or(T::from_f64(0.01)) { T::one() } else { T::zero() })
+        self.zip_with(rhs, BinaryOp::Neq, |a, b| if (a-b).abs() > thresh.unwrap_or(T::from_f64(0.01)) { T::one() } else { T::zero() })
     }
 
     /// Equals to 
@@ -333,15 +333,7 @@ impl<T: Float> Tensor<T> {
     /// Hardshrink
     /// x < -lambda ? x :(x > lambda ? x: 0) 
     pub fn hardshrink(&self,lambda:T) -> TensorResult<Self> { 
-        if self.all(|x| x < lambda.neg())?{
-            Ok(self.clone())
-        }else{
-           if self.all(|x| x < lambda)? {
-                Ok(self.clone())
-           }else{
-                Ok(self.zeros_like())
-           }
-        }
+       self.map(|x| if x.abs() > lambda { x }else{T::zero()}) 
     }
 
     /// Silu/Swish     
@@ -352,11 +344,7 @@ impl<T: Float> Tensor<T> {
     /// SELU
     /// λ * (x > 0 ? x : α(exp(x)-1))
     pub fn selu(&self,lambda:T,alpha:T) -> TensorResult<Self>{
-        if self.all(|x| x > T::zero())?{
-            Ok(self.mul_scalar(lambda)?)
-        }else{
-            Ok(self.exp()?.sub(&self.ones_like()).mul_scalar(alpha)?.mul_scalar(lambda)?)
-        }
+        self.map(|x| if x > T::zero() { lambda * x } else { lambda * alpha * (x.exp() - T::one()) })
     }
 
     /// Softplus
@@ -373,19 +361,10 @@ impl<T: Float> Tensor<T> {
 
     /// Elu
     /// if x > 0 ? x : alpha * (e^x - 1)
-    pub fn  elu(&self,alpha:T) -> TensorResult<Self>{
-        if self.gt(&self.ones_like())?.all(|x| x > T::zero())?{
-            Ok(self.clone())
-        }else{
-            Ok(self.exp()?.sub(&self.ones_like()).mul_scalar(alpha)?)
-        }
-    }
-
+    pub fn  elu(&self,alpha:T) -> TensorResult<Self>{ self.map(|x| if x > T::zero() { x } else { alpha * (x.exp() - T::one()) })}
 
     /// Leaky Relu
-    pub fn lrelu(&self, alpha: T) -> TensorResult<Self> {
-        self.via_host(|t| t.map(|x| if x > T::zero() { x } else { alpha * x }))
-    }
+    pub fn lrelu(&self, alpha: T) -> TensorResult<Self> { self.unary_with(UnaryOp::Relu, |x| if x > T::zero() { x } else { alpha * x })}
 
     /// Element wise power using two arrays A(a1,a2,..an) and B(b1,b2,..bn)  -> C(a1^b1,a2^b2,..an^bn)
     pub fn pow(&self, rhs: &Self) -> TensorResult<Self> { self.zip_with(rhs, BinaryOp::Pow, |a, b| a.powf(b)) }

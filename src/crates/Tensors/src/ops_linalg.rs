@@ -177,23 +177,22 @@ impl<T: Float> Tensor<T> {
 
     /// Is tensor linear?
     pub fn is_linear(&self) -> bool {
-        self.ndim() != 2 || self.shape()[1] != 1
-      
+        self.ndim() == 2 || self.shape()[1] == 1
     }
 
     /// Is tensor square?
     pub fn is_square(&self) -> bool{
-        self.ndim() != 2 || self.shape()[0] != self.shape()[1]
+        self.ndim() == 2 || self.shape()[0] == self.shape()[1]
     }
 
     /// Is tensor cubic?
     pub fn is_cubic(&self) -> bool{
-        self.ndim() != 3 || (self.shape()[0] != self.shape()[1] && self.shape()[1] != self.shape()[2])
+        self.ndim() == 3 || (self.shape()[0] == self.shape()[1] && self.shape()[1] == self.shape()[2])
     }
 
     /// Is tensor nthbic?
     pub fn is_nthbic(&self) -> bool{
-        self.shape().chunks_exact(2).any(|x| {x[0] != x[1]})
+        self.shape().chunks_exact(2).all(|x| {x[0] == x[1]})
     }
 
     /// Solve for X in AX = B using gauss_jordan 

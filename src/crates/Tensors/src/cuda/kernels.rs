@@ -21,6 +21,21 @@ extern "C" __global__ void strided_copy(T* out, const T* inp, size_t n, size_t n
     out[i] = inp[off];
 }
 
+// Parallel Clamping(Used for clipping and exploding gradients)
+extern "C" __global__ void clamp_k(T* out, const T* a, size_t n, T lo, T hi) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    T x = a[i];
+    out[i] = x < lo ? lo : (x > hi ? hi : x);
+}
+
+// Parallel where_cond
+extern "C" __global__ void where_k(T* out, const T* cond, const T* a, const T* b, size_t n) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = cond[i] != (T)0 ? a[i] : b[i];
+}
+
 //  opcode=>
 //  0  => negation
 //  1  => abs
@@ -138,6 +153,20 @@ extern "C" __global__ void reduce_k(T* out, const T* a, size_t cols, int op, T i
         __syncthreads();
     }
     if (threadIdx.x == 0) out[blockIdx.x] = sh[0];
+}
+
+// Parallel Scalar Op
+extern "C" __global__ void scalar_k(T* out, const T* a, size_t n, T scalar, int op) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    T x = a[i];
+    switch (op) {
+        case 0:  out[i] = x + scalar; break;
+        case 1:  out[i] = x - scalar; break;
+        case 2:  out[i] = x * scalar; break;
+        case 3:  out[i] = x / scalar; break;
+        default: out[i] = pow{S}(x, scalar); break;
+    }
 }
 "#;
 
