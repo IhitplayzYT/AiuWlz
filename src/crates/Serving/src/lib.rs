@@ -1,14 +1,35 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+pub mod Serving{
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    pub struct RequestPolicy<T,R>{
+        f: Box<dyn FnOnce(T) -> R>
     }
+
+    impl <T,R> RequestPolicy<T,R>{
+        pub fn new(f: Box<dyn FnOnce(T) -> R>) -> Self{
+            Self { f:f }
+        }
+
+        pub fn apply_policy(self,data:T) -> R{
+            (self.f)(data)
+        }
+    }
+
+
+
+    pub struct Server<M,P,T,R>{
+        model: dyn M,
+        policy: RequestPolicy<T,R>,
+        logger: Logger
+
+    }
+
+
+
+
+
+
+
+
+
+
 }

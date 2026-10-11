@@ -6,13 +6,12 @@ use crate::layout::normalize_dim;
 use crate::par;
 use crate::storage::Storage;
 use crate::tensor::Tensor;
-use std::cmp::Ordering;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReduceOp { Sum, Max, Min }
 
 /// Sort a Element array
-fn sorted<T: Element>(s: &[T]) -> Vec<T> {
+fn sorted<T: Element + Ord>(s: &[T]) -> Vec<T> {
     let mut v = s.to_vec();
     crate::par::sort(&mut v);
     v
