@@ -33,11 +33,7 @@ pub fn for_each_row<R: Send>(out: &mut [R], row_len: usize, work_per_row: usize,
     out.chunks_mut(row_len).enumerate().for_each(|(i,r)| f(i, r));
 }
 
-pub fn reduce<T: Sync + Send + Copy, R: Send>(data: &[T], init: R, f: impl Fn(R, T) -> R + Sync + Send) -> R {
-    #[cfg(feature = "parallel")]
-    if data.len() >= MX_PARALLEL {
-        return data.par_iter().fold(|| init, |acc, &x| f(acc, x)).reduce(|| init, |a, b| f(a, b));
-    }
+pub fn reduce<T: Sync + Send + Copy, R: Send + Copy>(data: &[T], init: R, f: impl Fn(R, T) -> R + Sync + Send) -> R {
     data.iter().fold(init, |acc, &x| f(acc, x))
 }
 

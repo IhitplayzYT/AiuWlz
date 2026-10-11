@@ -11,14 +11,14 @@ use crate::tensor::Tensor;
 pub enum ReduceOp { Sum, Max, Min }
 
 /// Sort a Element array
-fn sorted<T: Element + Ord>(s: &[T]) -> Vec<T> {
+fn sorted<T: Element + PartialOrd>(s: &[T]) -> Vec<T> {
     let mut v = s.to_vec();
-    crate::par::sort(&mut v);
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     v
 }
 
 /// Normal percentile calculation
-fn percentile_of<T: Element>(s: &[T], p: f64) -> T {
+fn percentile_of<T: Element + PartialOrd>(s: &[T], p: f64) -> T {
     if s.is_empty() { return T::zero(); }
     let v = sorted(s);
     let rank = (p / 100.0).clamp(0.0, 1.0) * (v.len() - 1) as f64;
@@ -28,16 +28,52 @@ fn percentile_of<T: Element>(s: &[T], p: f64) -> T {
 }
 
 /// Calculate mode
-fn mode_of<T: Element>(s: &[T]) -> T {
+fn mode_of<T: Element + PartialOrd>(s: &[T]) -> T {
     let v = sorted(s);
     if v.is_empty() { return T::zero(); }
     let (mut best, mut best_n, mut cur_n) = (v[0], 1_usize,1_usize);
     for i in 1..v.len() {
-        cur_n = if v[i] == v[i - 1] { cur_n + 1 } else { 1 };
+        cur_n = if v[i].partial_cmp(&v[i - 1]) == Some(std::cmp::Ordering::Equal) { cur_n + 1 } else { 1 };
         if cur_n > best_n { best_n = cur_n; best = v[i]; }
     }
     best
 }
+
+impl<T: Element + PartialOrd> Tensor<T> {
+    /// Median along a dim
+    pub fn median(&self, dim: isize, keepdim: bool) -> TensorResult<Self> { self.via_host(|t| t.reduce_with(dim, keepdim, |s| percentile_of(s, 50.0))) }
+    /// Median of all elems
+    pub fn median_all(&self) -> TensorResult<T> { Ok(percentile_of(&self.host_data()?, 50.0)) }
+    /// Quartile of elems across dim
+    pub fn quartile(&self,dim:isize,qtile: Quartile) -> TensorResult<Tensor<T>>{
+        let pct = match qtile{
+            Quartile::Q1 => 25,
+            Quartile::Q2 => 50,
+            Quartile::Q3 => 75,
+            Quartile::Q(x) => x.clamp(0, 100)
+        } as f64;
+        self.percentile(pct, dim, true)
+    }
+    /// Quartile of all elems
+    pub fn quartile_all(&self,qtile: Quartile) -> TensorResult<T>{
+        let pct = match qtile{
+            Quartile::Q1 => 25,
+            Quartile::Q2 => 50,
+            Quartile::Q3 => 75,
+            Quartile::Q(x) => x.clamp(0, 100)
+        } as f64;
+        self.percentile_all(pct)
+    }
+    /// Percentile along a dim
+    pub fn percentile(&self, p: f64, dim: isize, keepdim: bool) -> TensorResult<Self> { self.via_host(|t| t.reduce_with(dim, keepdim, |s| percentile_of(s, p))) }
+    /// Percentile of all elems
+    pub fn percentile_all(&self, p: f64) -> TensorResult<T> { Ok(percentile_of(&self.host_data()?, p)) }
+    /// Mode along a dim
+    pub fn mode(&self, dim: isize, keepdim: bool) -> TensorResult<Self> {self.via_host(|t| t.reduce_with(dim, keepdim, mode_of))}
+    /// Mode of all elems
+    pub fn mode_all(&self) -> TensorResult<T> { Ok(mode_of(&self.host_data()?)) }
+}
+
 
 impl<T: Element> Tensor<T> {
     /// Reduction over dim with an arbitrary slice → value function
@@ -125,34 +161,6 @@ impl<T: Element> Tensor<T> {
 
     /// Mean of all elems
     pub fn mean_all(&self) -> TensorResult<T> { Ok(T::from_f64(self.sum_all()?.to_f64() / self.numel() as f64)) }
-
-    /// Median along a dim
-    pub fn median(&self, dim: isize, keepdim: bool) -> TensorResult<Self> { self.via_host(|t| t.reduce_with(dim, keepdim, |s| percentile_of(s, 50.0))) }
-
-    /// Median of all elems 
-    pub fn median_all(&self) -> TensorResult<T> { Ok(percentile_of(&self.host_data()?, 50.0)) }
-
-    /// Quartile of elems across dim
-    pub fn quartile(&self,dim:isize,qtile: Quartile) -> TensorResult<Tensor<T>>{
-        let pct = match qtile{
-            Quartile::Q1 => 25,
-            Quartile::Q2 => 50,
-            Quartile::Q3 => 75,
-            Quartile::Q(x) => x.clamp(0, 100)
-        } as f64;
-        self.percentile(pct, dim, true)
-    }
-
-    /// Quartile of all elems
-    pub fn quartile_all(&self,qtile: Quartile) -> TensorResult<T>{
-        let pct = match qtile{
-            Quartile::Q1 => 25,
-            Quartile::Q2 => 50,
-            Quartile::Q3 => 75,
-            Quartile::Q(x) => x.clamp(0, 100)
-        } as f64;
-        self.percentile_all(pct)
-    }
     // TODO:  p99,p95,p90
 
     /// Calculate range over dim 
@@ -177,16 +185,6 @@ impl<T: Element> Tensor<T> {
     /// Calculates IQR across whole tensor
     pub fn iqr_all(&self) -> TensorResult<T>{Ok(self.quartile_all(Quartile::Q3)? - self.quartile_all(Quartile::Q1)?)}
 
-    /// Percentile along a dim
-    pub fn percentile(&self, p: f64, dim: isize, keepdim: bool) -> TensorResult<Self> { self.via_host(|t| t.reduce_with(dim, keepdim, |s| percentile_of(s, p))) }
-
-    /// Percentile of all elems
-    pub fn percentile_all(&self, p: f64) -> TensorResult<T> { Ok(percentile_of(&self.host_data()?, p)) }
-
-    /// Most frequent value (smallest wins ties).
-    pub fn mode(&self, dim: isize, keepdim: bool) -> TensorResult<Self> {self.via_host(|t| t.reduce_with(dim, keepdim, mode_of))}
-
-    pub fn mode_all(&self) -> TensorResult<T> { Ok(mode_of(&self.host_data()?)) }
 }
 
 
