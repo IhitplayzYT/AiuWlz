@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+polars = { version = "0.42", features = ["lazy", "dtype-datetime", "dtype-date", "dtype-time", "strings"] }
+polars-io = { version = "0.42", features = ["csv"] }
+polars-time = { version = "0.42" }
+calamine = "0.24"
+chrono = "0.4"
+Tensors = { path = "../Tensors" }
+thiserror = "1.0"
+polars-core = "0.42"
