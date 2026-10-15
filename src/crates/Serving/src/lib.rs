@@ -1,4 +1,6 @@
 pub mod Serving{
+    use Utilities::logger::Logger;
+
 
     pub struct RequestPolicy<T,R>{
         f: Box<dyn FnOnce(T) -> R>
@@ -15,12 +17,16 @@ pub mod Serving{
     }
 
 
+    pub trait Servable<X> {
+        fn train(&mut self,input:X);
+        fn predict(&self,input:X) -> X;
+    }
 
-    pub struct Server<M,P,T,R>{
-        model: dyn M,
+
+    pub struct Server<X,M:Servable<X>,T,R>{
+        model: M,
         policy: RequestPolicy<T,R>,
         logger: Logger
-
     }
 
 

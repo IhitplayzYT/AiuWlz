@@ -1,8 +1,8 @@
 use std::{collections::HashMap, error::Error, fs, hash::Hash, os::fd::RawFd, path::{Path, PathBuf}};
 
 use chrono::Utc;
-use serde::Serialize;
 
+#[allow(non_snake_case,non_camel_case_types,dead_code,unreachable_code,unused)]
 pub struct Logger{
     pub fflush: usize,
     pub curf: usize,
@@ -29,8 +29,6 @@ pub enum LogType{
     Trace,
     Log
 }
-
-
 
 
 pub enum OutputStream{

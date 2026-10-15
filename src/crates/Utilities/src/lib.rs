@@ -3,7 +3,9 @@ pub mod device;
 pub mod misc;
 pub mod logger;
 
+#[allow(non_snake_case,non_camel_case_types,dead_code)]
 pub mod Utilities{
+
     // Some trait definations for the numpy based impl of scalars,vectors and matrices
     
     use std::ops::{Add, Div, Mul, Sub};

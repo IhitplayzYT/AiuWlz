@@ -1,3 +1,4 @@
+#[allow(non_snake_case,non_camel_case_types,dead_code)]
 use crate::dtype::{Element, Float};
 use crate::error::{TensorResult, TensorError};
 #[cfg(feature = "cuda")]
@@ -127,8 +128,6 @@ pub fn gauss_jordan<T: Float>(lhs: &mut [T], l_lhs: usize, rhs: &mut [T], l_rhs:
         for r in c + 1..l_lhs {
             if lhs[r * l_lhs + c].abs() > lhs[p * l_lhs + c].abs() { p = r; }
         }
-
-
         if lhs[p * l_lhs + c].abs() <= EPS { return None; }
         if p != c {
             for j in 0..l_lhs { lhs.swap(c * l_lhs + j, p * l_lhs + j); }
