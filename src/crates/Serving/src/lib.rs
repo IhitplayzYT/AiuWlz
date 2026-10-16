@@ -23,11 +23,11 @@ pub mod Serving{
     }
 
 
-    pub struct Server<X,M:Servable<X>,T,R>{
-        model: M,
-        policy: RequestPolicy<T,R>,
-        logger: Logger
-    }
+//    pub struct Server<X,M:Servable<X>,T,R>{
+//        model: M,
+//        policy: RequestPolicy<T,R>,
+//        logger: Logger
+//    }
 
 
 

@@ -34,6 +34,7 @@ impl<T: Element> Tensor<T> {
             return Err(TensorError::InvalidShape("Cannot build Tensor from empty array".to_string()))
         }
         let n = data[0].len();
+        if data.iter().any(|r| r.len() != n) { return Err(TensorError::InvalidShape("Rows have diff lens".to_string())) }
         let data = data.into_iter().flatten().collect::<Vec<T>>();
         Ok(Self::from_comp(Storage::Cpu(data), Layout::contiguous(&[m,n])))
     }
@@ -49,6 +50,7 @@ impl<T: Element> Tensor<T> {
             return Err(TensorError::InvalidShape("Cannot build Tensor from empty array".to_string()))
         }
         let z = data[0][0].len();
+        if data.iter().any(|a| a.len() != y || a.iter().any(|b| b.len() != z)) { return Err(TensorError::InvalidShape("Inconsistent nested lens".to_string())) }
         let data = data.into_iter().flatten().collect::<Vec<Vec<T>>>().into_iter().flatten().collect::<Vec<T>>();
         Ok(Self::from_comp(Storage::Cpu(data), Layout::contiguous(&[x,y,z])))
     }

@@ -53,6 +53,7 @@ pub trait Element: _Element + Neg<Output = Self>{
 
 
 pub trait Float: Element {
+    fn epsilon() -> Self;
     fn exp(self) -> Self;
     fn ln(self) -> Self;
     fn sqrt(self) -> Self;
@@ -91,6 +92,7 @@ macro_rules! impl_float {
             fn floor(self) -> Self { <$t>::floor(self) }
             fn ceil(self) -> Self { <$t>::ceil(self) }
             fn is_nan(self) -> bool { <$t>::is_nan(self) }
+            fn epsilon() -> Self { <$t>::EPSILON }
         }
     };
 }

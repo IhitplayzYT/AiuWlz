@@ -40,6 +40,7 @@ fn mode_of<T: Element + PartialOrd>(s: &[T]) -> T {
 }
 
 impl<T: Element + PartialOrd> Tensor<T> {
+
     /// Median along a dim
     pub fn median(&self, dim: isize, keepdim: bool) -> TensorResult<Self> { self.via_host(|t| t.reduce_with(dim, keepdim, |s| percentile_of(s, 50.0))) }
     /// Median of all elems
@@ -265,10 +266,10 @@ impl<T: Float> Tensor<T> {
     pub fn skewness(&self) -> TensorResult<T>{ Ok(self.sub_scalar(self.mean_all()?)?.div_scalar(self.std_all(true)?)?.powi32(3)?.sum_all()?.div(T::from_f64(self.numel() as f64))) }
 
     /// Calculate skewness of Tensor along dim
-    pub fn skewness_all(&self,is_sample: bool,dim:isize) -> TensorResult<Tensor<T>>{ self.sub(&self.mean(dim, true)?)?.div(&self.std(dim, true, is_sample)?)?.powi32(3)?.div_scalar(T::from_f64(self.numel() as f64)) }
+    pub fn skewness_all(&self,is_sample: bool,dim:isize) -> TensorResult<Tensor<T>>{ self.sub(&self.mean(dim, true)?)?.div(&self.std(dim, true, is_sample)?)?.powi32(3)?.mean(dim, false) }
 
     /// Calculate kurtosis of Tensor along dim
-    pub fn kurtosis_all(&self,is_sample: bool,dim:isize) -> TensorResult<Tensor<T>>{ self.sub(&self.mean(dim, true)?)?.div(&self.std(dim, true, is_sample)?)?.powi32(4)?.div_scalar(T::from_f64(self.numel() as f64)) }
+    pub fn kurtosis_all(&self,is_sample: bool,dim:isize) -> TensorResult<Tensor<T>>{ self.sub(&self.mean(dim, true)?)?.div(&self.std(dim, true, is_sample)?)?.powi32(4)?.mean(dim, false) }
     
     /// Calculate kurtosis of Tensor
     pub fn kurtosis(&self) -> TensorResult<T>{ Ok(self.sub_scalar(self.mean_all()?)?.div_scalar(self.std_all(true)?)?.powi32(4)?.sum_all()?.div(T::from_f64(self.numel() as f64))) }
