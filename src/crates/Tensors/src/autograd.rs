@@ -1,5 +1,7 @@
 use std::{cell::Cell, sync::{Arc, Mutex, RwLock, atomic::{AtomicUsize, Ordering}}};
 
+use Utilities::device::Device::Device;
+
 use crate::{dtype::Float, error::Result, tensor::Tensor};
 
 #[cfg(feature = "parallel")]
@@ -92,5 +94,77 @@ impl<T: Float> Comp<T> {
     /// Init a new component from tensor, that wont autograd
     pub fn constant(data: Tensor<T>) -> Self { Self::new(data, false) }
     pub fn non_leaf(data: Tensor<T>) -> Self { Self::new(data, false) }
+
+
+    /// Make a comp from op,if no grad then const comp
+    pub fn from_op(y: Tensor<T>, parents: Vec<Comp<T>>, back: impl Fn(&Tensor<T>) -> Result<Vec<Option<Tensor<T>>>> + Send + Sync + 'static) -> Self {
+        if !is_grad_enabled() || !parents.iter().any(|p| p.0.requires_grad) { return Self::constant(y); }
+        Comp(Arc::new(Node { id: NEXT_ID.fetch_add(1, Ordering::Relaxed), data: RwLock::new(y), grad: Mutex::new(None), requires_grad: true, parents, back: Some(Box::new(back)) }))
+    }
+
+    /// Single parent op
+    pub fn un(&self, y: Tensor<T>, bw: impl Fn(&Tensor<T>) -> Result<Tensor<T>> + Send + Sync + 'static) -> Self {
+        Self::from_op(y, vec![self.clone()], move |g| Ok(vec![Some(bw(g)?)]))
+    }
+
+    /// Two parent ops
+    fn bin(&self, other: &Comp<T>, y: Tensor<T>, op_a: impl Fn(&Tensor<T>) -> Result<Tensor<T>> + Send + Sync + 'static, op_b: impl Fn(&Tensor<T>) -> Result<Tensor<T>> + Send + Sync + 'static) -> Self {
+        let (a_is_grad, b_is_grad, shape_a, shape_b) = (self.requires_grad(), other.requires_grad(), self.shape(), other.shape());
+        Self::from_op(y, vec![self.clone(), other.clone()], move |g| {
+            let (a, b) = match (a_is_grad,b_is_grad) {
+                (true, true) => {let (a, b) = join(|| {op_a(g)}, || {op_b(g)}); (Some(a?), Some(b?)) }
+                (true, false) => (Some(op_a(g)?), None),
+                (false, true) => (None, Some(op_b(g)?)),
+                _ => (None, None),
+            };
+            Ok(vec![a.map(|x| unbroadcast(x, &shape_a)).transpose()?, b.map(|x| unbroadcast(x, &shape_b)).transpose()?])
+        })
+    }
+
+    /// Accumulated grad of comp 
+    pub fn grad(&self) -> Option<Tensor<T>> { self.0.grad.lock().unwrap().clone() }
+
+    /// Clear grad 
+    pub fn zero_grad(&self) { *self.0.grad.lock().unwrap() = None; }
+
+    // Checks if autograd comp
+    pub fn requires_grad(&self) -> bool { self.0.requires_grad }
+
+    // Check if comp is leaf
+    pub fn is_leaf(&self) -> bool { self.0.back.is_none() }
+
+    /// Get const comp from self
+    pub fn detach(&self) -> Self { Self::constant(self.data()) }
+
+    /// Get shape
+    pub fn shape(&self) -> Vec<usize> { self.0.data.read().unwrap().shape().to_vec() }
+
+    /// Get ndim
+    pub fn ndim(&self) -> usize { self.0.data.read().unwrap().ndim() }
+
+    /// Get numel
+    pub fn numel(&self) -> usize { self.0.data.read().unwrap().numel() }
+
+    /// Get device
+    pub fn device(&self) -> Device { self.0.data.read().unwrap().device() }
+
+    /// Get data
+    pub fn data(&self) -> Tensor<T> { self.0.data.read().unwrap().clone() }
+
+    /// Get item
+    pub fn item(&self) -> Result<T> { self.data().item() }
+
+    /// Get vec of data
+    pub fn to_vec(&self) -> Result<Vec<T>> { self.data().to_vec() }
+
+    /// y=f(x) autograd if f is similar in both directions i.e y = f(x) and x' = f(y')
+    pub fn lin(&self, f: impl Fn(&Tensor<T>) -> Result<Tensor<T>> + Send + Sync + 'static) -> Result<Self> { Ok(self.un(f(&self.data())?, move |g| f(g))) }
+
+    /// Move to device,return the grad back to og device
+    pub fn to_device(&self, dev: Device) -> Result<Self> {
+        let (x, src) = (self.data(), self.device());
+        let y = x.to_device(dev)?;
+        Ok(self.un(y, move |g| g.to_device(src)))
+    }
 
 }
