@@ -332,7 +332,7 @@ impl<T: Float> Tensor<T> {
 
     /// Hardsigmoid
     /// clamp((x + 1)/2, 0, 1)
-    pub fn hardsigmoid(&self) -> TensorResult<Self> { self.add(&self.ones_like())?.div_scalar(T::from_f64(2.0))?.clamp(T::zero(), T::one())}
+    pub fn hardsigmoid(&self) -> TensorResult<Self> { self.add(&self.ones_like().mul_scalar(T::from_f64(3.0))?)?.div_scalar(T::from_f64(6.0))?.clamp(T::zero(), T::one())}
 
     /// Hardtanh
     /// clamp(x,min,max)

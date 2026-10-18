@@ -308,6 +308,18 @@ impl<T: Float> Comp<T> {
         Ok(self.bin(e, y, move |g| g.mul(&p)?.mul(&x.pow(&p.sub_scalar(T::one())?)?), move |g| g.mul(&y2)?.mul(&x2.ln()?)))
     }
 
+    /// Make a powf comp(constant expo)
+    /// y = a ^ c
+    /// dy/da = c * a ^ (c-1)
+    pub fn powf(&self, e: T) -> Result<Self> {
+        let x = self.data();
+        let y = x.powf(e)?;
+        Ok(self.un(y, move |g| if e == T::zero() { Ok(g.zeros_like()) } else { g.mul(&x.powf(e - T::one())?.mul_scalar(e)?) }))
+    }
+
+    pub fn powi32(&self, n: i32) -> Result<Self> { self.powf(T::from_f64(n as f64)) }
+    pub fn powi64(&self, n: i64) -> Result<Self> { self.powf(T::from_f64(n as f64)) }   
+
     /// cond != 0 ? a : b each backfn is a cond mask 
     pub fn where_cond(cond: &Tensor<T>, a: &Comp<T>, b: &Comp<T>) -> Result<Self> {
         let y = cond.where_cond(&a.data(), &b.data())?;
@@ -441,5 +453,146 @@ impl<T: Float> Comp<T> {
     /// Zero grad
     pub fn floor(&self) -> Result<Self> { let y = self.data().floor()?; Ok(self.un(y, |g| Ok(g.zeros_like()))) }
     pub fn ceil(&self) -> Result<Self> { let y = self.data().ceil()?; Ok(self.un(y, |g| Ok(g.zeros_like()))) }
+
+    
+    // ======================Activation fxn=============================
+
+
+    /// make sigmoid comp
+    /// y = 1 / (1 + e ^ -a)
+    /// dy/da = y * (1 - y)
+    pub fn sigmoid(&self) -> Result<Self> { 
+        let y = self.data().sigmoid()?; 
+        let yc = y.clone(); 
+        Ok(self.un(y, move |g| g.mul(&yc.mul(&yc.neg()?.add_scalar(T::one())?)?))) 
+    }
+
+    
+    /// make relu comp
+    /// y = {a > 0 -> a, else -> 0}
+    /// dy/da = {a > 0 -> 1,else -> 0}
+    pub fn relu(&self) -> Result<Self> {
+        let x = self.data();
+        let y = x.relu()?;
+        Ok(self.un(y, move |g| g.mul(&x.gt(&x.zeros_like())?)))
+    }
+
+    /// make leaky relu comp
+    /// y = {a > 0 -> a, else -> a * alpha}
+    /// dy/da = {a > 0 -> 1,else -> alpha}
+    pub fn lrelu(&self, alpha: T) -> Result<Self> {
+        let x = self.data();
+        let y = x.lrelu(alpha)?;
+        Ok(self.un(y, move |g| g.mul(&x.gt(&x.zeros_like())?.mul_scalar(T::one() - alpha)?.add_scalar(alpha)?)))
+    }
+
+    /// make random relu comp
+    /// y = {a > 0 -> a, else -> a * alpha}
+    /// dy/da = {a > 0 -> 1,else -> alpha}
+    pub fn rrelu(&self, alpha: T) -> Result<Self> {
+        let x = self.data();
+        let y = x.lrelu(alpha)?;
+        Ok(self.un(y, move |g| g.mul(&x.gt(&x.zeros_like())?.mul_scalar(T::one() - alpha)?.add_scalar(alpha)?)))
+    }
+
+    /// make gelu comp
+    // made usign ai
+    pub fn gelu(&self) -> Result<Self> {
+        let x = self.data();
+        let y = x.gelu()?;
+        Ok(self.un(y, move |g| {
+            let (c, a, one, half) = (T::from_f64(0.7978845608028654), T::from_f64(0.044715), T::one(), T::from_f64(0.5));
+            let x2 = x.square()?;
+            let t = x.add(&x.mul(&x2)?.mul_scalar(a)?)?.mul_scalar(c)?.tanh()?;
+            let sech2 = t.square()?.neg()?.add_scalar(one)?;
+            let du = x2.mul_scalar(T::from_f64(3.0) * a)?.add_scalar(one)?.mul_scalar(c)?;
+            g.mul(&t.add_scalar(one)?.mul_scalar(half)?.add(&x.mul(&sech2)?.mul(&du)?.mul_scalar(half)?)?)
+        }))
+    }
+
+    /// Make selu comp
+    /// y = {a > 0 -> lambda * a, else -> lambda * alpha * (e^a - 1 ) }
+    /// dy/da = {a > o -> lambda,else -> lambda * alpha * e^a}
+    // Tricky eqn so used ai to build
+    pub fn selu(&self, lambda: T, alpha: T) -> Result<Self> {
+        let x = self.data();
+        let y = x.selu(lambda, alpha)?;
+        Ok(self.un(y, move |g| {
+            let m = x.gt(&x.zeros_like())?;
+            let neg = m.neg()?.add_scalar(T::one())?.mul(&x.exp()?.mul_scalar(lambda * alpha)?)?;
+            g.mul(&m.mul_scalar(lambda)?.add(&neg)?)
+        }))
+    }
+
+    /// Make elu comp
+    /// y = {a > 0 -> a, else ->  alpha * (e^a - 1 ) }
+    /// dy/da = {a > 0 -> 1 ,else ->  alpha * e^a}
+    pub fn elu(&self, alpha: T) -> Result<Self> {
+        let x = self.data();
+        let y = x.elu(alpha)?;
+        Ok(self.un(y, move |g| {
+            let m = x.gt(&x.zeros_like())?;
+            let neg = m.neg()?.add_scalar(T::one())?.mul(&x.exp()?.mul_scalar(alpha)?)?;
+            g.mul(&m.add(&neg)?)
+        }))
+    }
+
+    /// make softplus comp
+    /// y = ln(1 + e^a)
+    /// dy/da = 1 / ( 1 + e^-a) 
+    pub fn softplus(&self) -> Result<Self> { 
+        let x = self.data(); 
+        let y = x.softplus()?; 
+        Ok(self.un(y, move |g| g.mul(&x.sigmoid()?))) 
+    }
+
+    /// Make hardshrink comp
+    /// y = {a < -lambda || a > lambda -> a, else -> 0 }
+    /// dy/da = {a < -lambda || a > lambda -> 1, else -> 0 }
+    pub fn hardshrink(&self, lambda: T) -> Result<Self> {
+        let x = self.data();
+        let y = x.hardshrink(lambda)?;
+        Ok(self.un(y, move |g| g.mul(&x.abs()?.gt(&x.fill_like(lambda))?)))
+    }
+
+    /// Make hardtanh comp
+    /// y = {a > mx -> mx,a < mn -> mn,else -> a}
+    pub fn hardtanh(&self, min: T, max: T) -> Result<Self> { 
+        self.clamp(min, max) // This is autograd clamp
+    }
+
+    /// Make hardsigmoid comp
+    /// y = {a > mx -> mx,a < mn -> mn,else -> (a + 3) / 6, mx = 1,mn = 0}
+    pub fn hardsigmoid(&self) -> Result<Self> { 
+        self.add_scalar(T::one().mul(T::from_f64(3.0)))?.div_scalar(T::from_f64(6.0))?.clamp(T::zero(), T::one()) 
+    }
+
+    /// Make tanshrink comp
+    /// y = a - tanh(a)
+    pub fn tanhshrink(&self) -> Result<Self> { 
+        self.sub(&self.tanh()?) 
+    }
+
+    /// make silu/swish comp
+    /// y = a * sigmoid(a)
+    pub fn silu(&self) -> Result<Self> { self.mul(&self.sigmoid()?) }
+    pub fn swish(&self) -> Result<Self> { self.silu() }
+
+    /// make softsign comp
+    /// y = a / (1 + |a|)
+    /// dy/da = 
+    pub fn softsign(&self) -> Result<Self> { 
+        self.div(&self.abs()?.add_scalar(T::one())?) 
+    }
+
+    /// make mish comp
+    /// y = a * tanh(softplus(a))
+    /// compliated derivative
+    // Used ai  
+    pub fn mish(&self) -> Result<Self> { 
+        self.mul(&self.softplus()?.tanh()?) 
+    }
+
+
 
 }
