@@ -1,8 +1,8 @@
-use std::{cell::Cell, sync::{Arc, Mutex, RwLock, atomic::{AtomicUsize, Ordering}}};
+use std::{cell::Cell, collections::{HashMap, HashSet}, sync::{Arc, Mutex, RwLock, atomic::{AtomicUsize, Ordering}}};
 
 use Utilities::device::Device::Device;
 
-use crate::{dtype::Float, error::Result, tensor::Tensor};
+use crate::{dtype::Float, error::{Result, TensorError}, tensor::Tensor};
 
 #[cfg(feature = "parallel")]
 fn join<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B + Send) -> (A, B) { rayon::join(a, b) }
@@ -102,12 +102,12 @@ impl<T: Float> Comp<T> {
         Comp(Arc::new(Node { id: NEXT_ID.fetch_add(1, Ordering::Relaxed), data: RwLock::new(y), grad: Mutex::new(None), requires_grad: true, parents, back: Some(Box::new(back)) }))
     }
 
-    /// Single parent op
+    /// Comp for single parent ops
     pub fn un(&self, y: Tensor<T>, bw: impl Fn(&Tensor<T>) -> Result<Tensor<T>> + Send + Sync + 'static) -> Self {
         Self::from_op(y, vec![self.clone()], move |g| Ok(vec![Some(bw(g)?)]))
     }
 
-    /// Two parent ops
+    /// Comp for two parent ops
     fn bin(&self, other: &Comp<T>, y: Tensor<T>, op_a: impl Fn(&Tensor<T>) -> Result<Tensor<T>> + Send + Sync + 'static, op_b: impl Fn(&Tensor<T>) -> Result<Tensor<T>> + Send + Sync + 'static) -> Self {
         let (a_is_grad, b_is_grad, shape_a, shape_b) = (self.requires_grad(), other.requires_grad(), self.shape(), other.shape());
         Self::from_op(y, vec![self.clone(), other.clone()], move |g| {
@@ -151,6 +151,13 @@ impl<T: Float> Comp<T> {
     /// Get data
     pub fn data(&self) -> Tensor<T> { self.0.data.read().unwrap().clone() }
 
+    // Set data
+    pub fn set_data(&self, t: Tensor<T>) -> Result<()> {
+        if t.shape() != &self.shape()[..] { return Err(TensorError::ShapeMismatch { op: "set_data", lhs: self.shape(), rhs: t.shape().to_vec() }); }
+        *self.0.data.write().unwrap() = t;
+        Ok(())
+    }
+
     /// Get item
     pub fn item(&self) -> Result<T> { self.data().item() }
 
@@ -166,5 +173,157 @@ impl<T: Float> Comp<T> {
         let y = x.to_device(dev)?;
         Ok(self.un(y, move |g| g.to_device(src)))
     }
+
+    /// SGD: w -= lr * grad
+    pub fn sgd(&self, lr: T) -> Result<()> {
+        if let Some(g) = self.grad() { self.set_data(self.data().sub(&g.mul_scalar(lr)?)?)?; }
+        Ok(())
+    }
+
+    /// Topo sort comp graph
+    pub fn topo_sort(&self) -> Vec<Comp<T>> {
+        let mut ret = Vec::new();
+        let mut seen= HashSet::new();
+        let mut stack= vec![(self.clone(), 0)];
+        seen.insert(self.0.id);
+        while let Some((v, i)) = stack.pop() {
+            if i < v.0.parents.len() {
+                let p = v.0.parents[i].clone();
+                stack.push((v,i+1));
+                if p.0.requires_grad && seen.insert(p.0.id) { stack.push((p, 0)); }
+            } else {
+                ret.push(v);     
+            }
+        }
+        ret
+    } 
+
+    /// Accumulate grad bhetween slef and another tensor
+    pub fn acc_grad(&self, g: Tensor<T>) -> Result<()> {
+        let mut s = self.0.grad.lock().unwrap();
+        let ret = match s.take() { Some(old) => old.add(&g)?, None => g };
+        *s = Some(ret);
+        Ok(())
+    }
+
+    /// Backprop
+    pub fn backward(&self) -> Result<()> {
+        if self.numel() != 1 { return Err(TensorError::InvalidShape(format!("backward() needs a single element Comp, got {:?}, use backward_with", self.shape()))); }
+        self.backward_with(self.data().ones_like())
+    }
+
+    /// Backward pass using a init as b
+    pub fn backward_with(&self, b: Tensor<T>) -> Result<()> {
+        if !self.0.requires_grad { return Err(TensorError::Custom("Cannot backprop a comp without requires_grad".into())); }
+        if b.shape() != self.shape().as_slice() { return Err(TensorError::ShapeMismatch { op: "backward_with", lhs: self.shape(), rhs: b.shape().to_vec() }); }
+        let mut grads = HashMap::new();
+        grads.insert(self.0.id, b);
+        for v in self.topo_sort().into_iter().rev() {
+            let Some(g) = grads.remove(&v.0.id) else { continue };
+            match &v.0.back {
+                None => v.acc_grad(g)?, // If no bakprop fn simply acc_grad
+                Some(back) => {
+                    let gs = back(&g)?;
+                    for (p, pg) in v.0.parents.iter().zip(gs) {
+                        // Accumulate the grads into parents
+                        let Some(pg) = pg else { continue };
+                        if !p.0.requires_grad { continue; }
+                        if pg.shape() != &p.shape()[..] { return Err(TensorError::ShapeMismatch { op: "backward_with", lhs: p.shape(), rhs: pg.shape().to_vec() }); }
+                        let merged = match grads.remove(&p.0.id) { Some(old) => old.add(&pg)?, None => pg };
+                        grads.insert(p.0.id, merged);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Custom univariable op with supplied fn and derivative
+    pub fn apply(&self, f: impl Fn(T) -> T + Sync + Send, df: impl Fn(T) -> T + Sync + Send + 'static) -> Result<Self> {
+        let x = self.data();
+        Ok(self.un(x.map(f)?, move |g| g.mul(&x.map(&df)?)))
+    }
+
+    /// Make a add comp 
+    /// y=a+b
+    /// dy/da = 1
+    /// dy/db = 1
+    pub fn add(&self, o: &Comp<T>) -> Result<Self> {
+        Ok(self.bin(o, self.data().add(&o.data())?, |g| Ok(g.clone()), |g| Ok(g.clone()))) 
+    }
+
+    /// Make a sub comp 
+    /// y=a-b
+    /// dy/da = 1
+    /// dy/db = -1
+    pub fn sub(&self, o: &Comp<T>) -> Result<Self> { 
+        Ok(self.bin(o, self.data().sub(&o.data())?, |g| Ok(g.clone()), |g| g.neg())) 
+    }
+
+    /// Make a mul comp 
+    /// y=a*b
+    /// dy/da = b
+    /// dy/db = a
+    pub fn mul(&self, o: &Comp<T>) -> Result<Self> {
+        let (a, b) = (self.data(), o.data());
+        Ok(self.bin(o,  a.mul(&b)?, move |g| g.mul(&b), move |g| g.mul(&a)))
+    }
+    
+    /// Make a div comp 
+    /// y=a/b
+    /// dy/da = 1/b 
+    /// dy/db = -a/b^2
+    pub fn div(&self, o: &Comp<T>) -> Result<Self> {
+        let (a, b) = (self.data(), o.data());
+        let y = a.div(&b)?;
+        let b2 = b.clone();
+        Ok(self.bin(o, y, move |g| g.div(&b), move |g| g.mul(&a)?.div(&b2.square()?)?.neg()))
+    }
+
+    /// Element wise max, share the grad equally
+    pub fn max(&self, o: &Comp<T>) -> Result<Self> {
+        let (a, b) = (self.data(), o.data());
+        let y = a.maximum(&b)?;
+        let (a2, b2) = (a.clone(), b.clone());
+        Ok(self.bin(o, y, move |g| g.mul(&split_ratio(&a, &b, true)?), move |g| g.mul(&split_ratio(&b2, &a2, true)?)))
+    }
+
+    /// Element wise min, share the grad equally
+    pub fn min(&self, o: &Comp<T>) -> Result<Self> {
+        let (a, b) = (self.data(), o.data());
+        let y = a.minimum(&b)?;
+        let (a2, b2) = (a.clone(), b.clone());
+        Ok(self.bin(o, y, move |g| g.mul(&split_ratio(&a, &b, false)?), move |g| g.mul(&split_ratio(&b2, &a2, false)?)))
+    }
+
+    /// Make a pow comp
+    /// y = a ^ b
+    /// dy/da = b * a ^ (b-1)
+    /// dy/db = a^b * ln(a)
+    pub fn pow(&self, e: &Comp<T>) -> Result<Self> {
+        let (x, p) = (self.data(), e.data());
+        let y = x.pow(&p)?;
+        let (x2, y2) = (x.clone(), y.clone());
+        Ok(self.bin(e, y, move |g| g.mul(&p)?.mul(&x.pow(&p.sub_scalar(T::one())?)?), move |g| g.mul(&y2)?.mul(&x2.ln()?)))
+    }
+
+    /// cond != 0 ? a : b each backfn is a cond mask 
+    pub fn where_cond(cond: &Tensor<T>, a: &Comp<T>, b: &Comp<T>) -> Result<Self> {
+        let y = cond.where_cond(&a.data(), &b.data())?;
+        let (c1, c2) = (cond.clone(), cond.clone());
+        Ok(a.bin(b, y, move |g| c1.where_cond(g, &g.zeros_like()), move |g| c2.where_cond(&g.zeros_like(), g)))
+    }
+
+    /// Comparisons are const comp 
+    pub fn eq_t(&self, o: &Comp<T>) -> Result<Self> { Ok(Self::constant(self.data().eq_t(&o.data())?)) }
+    pub fn neq_t(&self, o: &Comp<T>) -> Result<Self> { Ok(Self::constant(self.data().neq_t(&o.data())?)) }
+    pub fn gt(&self, o: &Comp<T>) -> Result<Self> { Ok(Self::constant(self.data().gt(&o.data())?)) }
+    pub fn lt(&self, o: &Comp<T>) -> Result<Self> { Ok(Self::constant(self.data().lt(&o.data())?)) }
+    pub fn ge(&self, o: &Comp<T>) -> Result<Self> { Ok(Self::constant(self.data().ge(&o.data())?)) }
+    pub fn le(&self, o: &Comp<T>) -> Result<Self> { Ok(Self::constant(self.data().le(&o.data())?)) }
+    pub fn thresh_eq_t(&self, o: &Comp<T>, thresh: Option<T>) -> Result<Self> { Ok(Self::constant(self.data().thresh_eq_t(&o.data(), thresh)?)) }
+    pub fn thresh_neq_t(&self, o: &Comp<T>, thresh: Option<T>) -> Result<Self> { Ok(Self::constant(self.data().thresh_neq_t(&o.data(), thresh)?)) }
+
+
 
 }
