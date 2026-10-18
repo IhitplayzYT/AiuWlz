@@ -36,17 +36,17 @@ type BackFn<T> = Box<dyn Fn(&Tensor<T>) -> Result<Vec<Option<Tensor<T>>>> + Send
 
 
 /// Node in computational graph
-struct Node<T: Float> {
-    id: usize,
-    data: RwLock<Tensor<T>>,
-    grad: Mutex<Option<Tensor<T>>>,
-    requires_grad: bool,
-    parents: Vec<Comp<T>>,
-    back: Option<BackFn<T>>, // BackFn dependency injection
+pub struct Node<T: Float> {
+    pub id: usize,
+    pub data: RwLock<Tensor<T>>,
+    pub grad: Mutex<Option<Tensor<T>>>,
+    pub requires_grad: bool,
+    pub parents: Vec<Comp<T>>,
+    pub back: Option<BackFn<T>>, // BackFn dependency injection
 }
 
 /// Convert to shape by summing along the extra dim until we reach tgt shape
-fn unbroadcast<T: Float>(mut g: Tensor<T>, shape: &[usize]) -> Result<Tensor<T>> {
+pub fn unbroadcast<T: Float>(mut g: Tensor<T>, shape: &[usize]) -> Result<Tensor<T>> {
     if g.shape() == shape { return Ok(g); }
     while g.ndim() > shape.len() { g = g.sum(0, false)?; }
     for (d, &s) in shape.iter().enumerate() { if s == 1 && g.shape()[d] != 1 { g = g.sum(d as isize, true)?; } }
@@ -54,15 +54,15 @@ fn unbroadcast<T: Float>(mut g: Tensor<T>, shape: &[usize]) -> Result<Tensor<T>>
 }
 
 /// Convert to shape
-fn expand_to<T: Float>(g: &Tensor<T>, shape: &[usize]) -> Result<Tensor<T>> { g.broadcast_to(shape)?.compact() }
+pub fn expand_to<T: Float>(g: &Tensor<T>, shape: &[usize]) -> Result<Tensor<T>> { g.broadcast_to(shape)?.compact() }
 
 
 /// Add a dim back
-fn keep<T: Float>(g: &Tensor<T>, d: usize, keepdim: bool) -> Result<Tensor<T>> {  if keepdim { Ok(g.clone()) } else { g.unsqueeze(d as isize) } }
+pub fn keep<T: Float>(g: &Tensor<T>, d: usize, keepdim: bool) -> Result<Tensor<T>> {  if keepdim { Ok(g.clone()) } else { g.unsqueeze(d as isize) } }
 
 
 /// Moves dim to the last 
-fn rows_to_tensor<T: Float>(data: Vec<T>, shape: &[usize], d: usize) -> Result<Tensor<T>> {
+pub fn rows_to_tensor<T: Float>(data: Vec<T>, shape: &[usize], d: usize) -> Result<Tensor<T>> {
     let nd = shape.len();
     // Get all dims apart from the d
     let mut x: Vec<usize> = shape.iter().enumerate().filter(|(i, _)| *i != d).map(|(_, &s)| s).collect();
@@ -72,7 +72,7 @@ fn rows_to_tensor<T: Float>(data: Vec<T>, shape: &[usize], d: usize) -> Result<T
 }
 
 /// Even split of grad update taht use min/max btwn 2 vects 
-fn split_ratio<T: Float>(a: &Tensor<T>, b: &Tensor<T>, greater: bool) -> Result<Tensor<T>> {
+pub fn split_ratio<T: Float>(a: &Tensor<T>, b: &Tensor<T>, greater: bool) -> Result<Tensor<T>> {
     let h = a.eq_t(b)?.mul_scalar(T::from_f64(0.5))?;
     (if greater { a.gt(b)? } else { a.lt(b)? }).add(&h)
 }
@@ -181,6 +181,7 @@ impl<T: Float> Comp<T> {
     }
 
     /// Topo sort comp graph
+    // Used ai to make
     pub fn topo_sort(&self) -> Vec<Comp<T>> {
         let mut ret = Vec::new();
         let mut seen= HashSet::new();
@@ -314,7 +315,7 @@ impl<T: Float> Comp<T> {
         Ok(a.bin(b, y, move |g| c1.where_cond(g, &g.zeros_like()), move |g| c2.where_cond(&g.zeros_like(), g)))
     }
 
-    /// Comparisons are const comp 
+    /// Comparisons are const leaf comp 
     pub fn eq_t(&self, o: &Comp<T>) -> Result<Self> { Ok(Self::constant(self.data().eq_t(&o.data())?)) }
     pub fn neq_t(&self, o: &Comp<T>) -> Result<Self> { Ok(Self::constant(self.data().neq_t(&o.data())?)) }
     pub fn gt(&self, o: &Comp<T>) -> Result<Self> { Ok(Self::constant(self.data().gt(&o.data())?)) }
@@ -324,6 +325,121 @@ impl<T: Float> Comp<T> {
     pub fn thresh_eq_t(&self, o: &Comp<T>, thresh: Option<T>) -> Result<Self> { Ok(Self::constant(self.data().thresh_eq_t(&o.data(), thresh)?)) }
     pub fn thresh_neq_t(&self, o: &Comp<T>, thresh: Option<T>) -> Result<Self> { Ok(Self::constant(self.data().thresh_neq_t(&o.data(), thresh)?)) }
 
+    /// Make a scalar add comp
+    /// y = a+c
+    /// dy/da = 1
+    pub fn add_scalar(&self, v: T) -> Result<Self> { Ok(self.un(self.data().add_scalar(v)?, |g| Ok(g.clone()))) }
 
+    /// Make a scalar sub comp
+    /// y = a-c
+    /// dy/da = 1
+    pub fn sub_scalar(&self, v: T) -> Result<Self> { Ok(self.un(self.data().sub_scalar(v)?, |g| Ok(g.clone()))) }
+
+    /// Make a scalar mul comp
+    /// y = a*c
+    /// dy/da = c
+    pub fn mul_scalar(&self, v: T) -> Result<Self> { Ok(self.un(self.data().mul_scalar(v)?, move |g| g.mul_scalar(v))) }
+    
+    /// Make a scalar div comp
+    /// y = a/c
+    /// dy/da = 1/c   
+    pub fn div_scalar(&self, v: T) -> Result<Self> { Ok(self.un(self.data().div_scalar(v)?, move |g| g.div_scalar(v))) }
+
+    /// Make neg comp
+    /// y = -a
+    /// dy/da = -1
+    pub fn neg(&self) -> Result<Self> { let y = self.data().neg()?; Ok(self.un(y, |g| g.neg())) }
+
+    /// Make abs comp
+    /// y = |a|
+    /// dy/da = {a < 0 -> -1  ,a > 0 -> 1} 
+    pub fn abs(&self) -> Result<Self> {
+        let x = self.data();
+        Ok(self.un( x.abs()?, move |g| { let z = x.zeros_like(); g.mul(&x.gt(&z)?.sub(&x.lt(&z)?)?) }))
+    }
+
+    /// Make square comp
+    /// y = a ^ 2
+    /// dy/da = 2 * a
+    pub fn square(&self) -> Result<Self> {
+        let x = self.data();
+        Ok(self.un( x.square()?, move |g| g.mul(&x.mul_scalar(T::from_f64(2.0))?)))
+    }
+
+    /// Make clamp comp
+    /// y = a ^ 2
+    /// dy/da = {a < mn && x > mx -> 0 ,else -> 1}
+    pub fn clamp(&self, lo: T, hi: T) -> Result<Self> {
+        let x = self.data();
+        let y = x.clamp(lo, hi)?;
+        Ok(self.un(y, move |g| g.mul(&x.ge(&x.fill_like(lo))?.mul(&x.le(&x.fill_like(hi))?)?)))
+    }
+
+    /// Make exp comp
+    /// y = e ^ a
+    /// dy/da = e ^ a
+    pub fn exp(&self) -> Result<Self> {
+        let y = self.data().exp()?;
+        let yc = y.clone(); 
+        Ok(self.un(y, move |g| g.mul(&yc))) 
+    }
+
+    /// Make ln comp
+    /// y = ln(a)
+    /// dy/da = 1/a
+    pub fn ln(&self) -> Result<Self> { 
+        let x = self.data(); 
+        let y = x.ln()?; 
+        Ok(self.un(y, move |g| g.div(&x))) 
+    }
+
+    /// make sqrt comp
+    /// y = a ^ 0.5
+    /// dy/da = 0.5 / a 
+    pub fn sqrt(&self) -> Result<Self> { 
+        let y = self.data().sqrt()?; 
+        let yc = y.clone(); 
+        Ok(self.un(y, move |g| g.div(&yc.mul_scalar(T::from_f64(2.0))?))) 
+    }
+
+    /// make sin comp
+    /// y = sin(a)
+    /// dy/da = cos(a)
+    pub fn sin(&self) -> Result<Self> { 
+        let x = self.data(); 
+        let y = x.sin()?; 
+        Ok(self.un(y, move |g| g.mul(&x.cos()?))) 
+    }
+
+    /// make cos comp
+    /// y = cos(a)
+    /// dy/da = -sin(a)   
+    pub fn cos(&self) -> Result<Self> { 
+        let x = self.data(); 
+        let y = x.cos()?; 
+        Ok(self.un(y, move |g| g.mul(&x.sin()?)?.neg())) 
+    }
+
+    /// make tan comp
+    /// y = tanh(a)
+    /// dy/da = 1 - tanh^2(a)
+    pub fn tanh(&self) -> Result<Self> { 
+        let y = self.data().tanh()?; 
+        let yc = y.clone(); 
+        Ok(self.un(y, move |g| g.mul(&yc.square()?.neg()?.add_scalar(T::one())?))) 
+    }
+
+    /// make recip comp
+    /// y = 1/a
+    /// dy/da = -1 / a ^ 2
+    pub fn recip(&self) -> Result<Self> { 
+        let y = self.data().recip()?; 
+        let yc = y.clone(); 
+        Ok(self.un(y, move |g| g.mul(&yc.square()?)?.neg())) 
+    }
+
+    /// Zero grad
+    pub fn floor(&self) -> Result<Self> { let y = self.data().floor()?; Ok(self.un(y, |g| Ok(g.zeros_like()))) }
+    pub fn ceil(&self) -> Result<Self> { let y = self.data().ceil()?; Ok(self.un(y, |g| Ok(g.zeros_like()))) }
 
 }
