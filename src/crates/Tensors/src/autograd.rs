@@ -1002,3 +1002,36 @@ impl<T: Float> Comp<T> {
     }
 
 }
+// So no need to explicilty do a.add(b) instead we can do a + b
+
+impl<T: Float> std::ops::Neg for &Comp<T> { type Output = Comp<T>; fn neg(self) -> Comp<T> { Comp::neg(self).expect("Comp neg failed") } }
+impl<T: Float> std::ops::Neg for Comp<T> { type Output = Comp<T>; fn neg(self) -> Comp<T> { Comp::neg(&self).expect("Comp neg failed") } }
+
+macro_rules! impl_bin_ops_comp {
+    ($tr:ident, $m:ident) => {
+        impl<T: Float> std::ops::$tr<&Comp<T>> for &Comp<T> { type Output = Comp<T>; fn $m(self, rhs: &Comp<T>) -> Comp<T> { Comp::$m(self, rhs).expect(concat!("Comp ", stringify!($m), " failed")) } }
+        impl<T: Float> std::ops::$tr<Comp<T>> for Comp<T> { type Output = Comp<T>; fn $m(self, rhs: Comp<T>) -> Comp<T> { Comp::$m(&self, &rhs).expect(concat!("Comp ", stringify!($m), " failed")) } }
+        impl<T: Float> std::ops::$tr<&Comp<T>> for Comp<T> { type Output = Comp<T>; fn $m(self, rhs: &Comp<T>) -> Comp<T> { Comp::$m(&self, rhs).expect(concat!("Comp ", stringify!($m), " failed")) } }
+        impl<T: Float> std::ops::$tr<Comp<T>> for &Comp<T> { type Output = Comp<T>; fn $m(self, rhs: Comp<T>) -> Comp<T> { Comp::$m(self, &rhs).expect(concat!("Comp ", stringify!($m), " failed")) } }
+    };
+}
+impl_bin_ops_comp!(Add, add);
+impl_bin_ops_comp!(Sub, sub);
+impl_bin_ops_comp!(Mul, mul);
+impl_bin_ops_comp!(Div, div);
+
+macro_rules! impl_scalar_ops_comp {
+    ($t:ty) => {
+        impl std::ops::Add<$t> for &Comp<$t> { type Output = Comp<$t>; fn add(self, v: $t) -> Comp<$t> { self.add_scalar(v).unwrap() } }
+        impl std::ops::Sub<$t> for &Comp<$t> { type Output = Comp<$t>; fn sub(self, v: $t) -> Comp<$t> { self.sub_scalar(v).unwrap() } }
+        impl std::ops::Mul<$t> for &Comp<$t> { type Output = Comp<$t>; fn mul(self, v: $t) -> Comp<$t> { self.mul_scalar(v).unwrap() } }
+        impl std::ops::Div<$t> for &Comp<$t> { type Output = Comp<$t>; fn div(self, v: $t) -> Comp<$t> { self.div_scalar(v).unwrap() } }
+        impl std::ops::Add<$t> for Comp<$t> { type Output = Comp<$t>; fn add(self, v: $t) -> Comp<$t> { self.add_scalar(v).unwrap() } }
+        impl std::ops::Sub<$t> for Comp<$t> { type Output = Comp<$t>; fn sub(self, v: $t) -> Comp<$t> { self.sub_scalar(v).unwrap() } }
+        impl std::ops::Mul<$t> for Comp<$t> { type Output = Comp<$t>; fn mul(self, v: $t) -> Comp<$t> { self.mul_scalar(v).unwrap() } }
+        impl std::ops::Div<$t> for Comp<$t> { type Output = Comp<$t>; fn div(self, v: $t) -> Comp<$t> { self.div_scalar(v).unwrap() } }
+    };
+}
+
+impl_scalar_ops_comp!(f32);
+impl_scalar_ops_comp!(f64);
