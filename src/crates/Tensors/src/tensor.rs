@@ -354,10 +354,17 @@ impl<T: Element> Tensor<T> {
         self.reshape(&shape)
     }
 
-    pub fn broadcast_to(&self, shape: &[usize]) -> Result<Self> { Ok(self.view_as(self.layout.broadcast_to(shape)?)) }    
+    /// No copy layout broadcast
+    pub fn broadcast_to(&self, shape: &[usize]) -> Result<Self> { Ok(self.view_as(self.layout.broadcast_to(shape)?)) }   
     pub fn expand(&self, shape: &[usize]) -> Result<Self> { self.broadcast_to(shape) }
+
+    /// Pick a dim and get a slice from that dim
     pub fn narrow(&self, dim: isize, start: usize, len: usize) -> Result<Self> { Ok(self.view_as(self.layout.narrow(normalize_dim(dim, self.ndim())?, start, len)?))}
+
+    /// Pick a dim  return the tensor along that entire dim
     pub fn select(&self, dim: isize, index: usize) -> Result<Self> { Ok(self.view_as(self.layout.select(normalize_dim(dim, self.ndim())?, index)?))}
+
+    /// Reverse elem orderign along a dim
     pub fn flip(&self, dim: isize) -> Result<Self> { Ok(self.view_as(self.layout.flip(normalize_dim(dim, self.ndim())?)?))}
 
     /// Move dim to the last position suggested and made by AI for reductions

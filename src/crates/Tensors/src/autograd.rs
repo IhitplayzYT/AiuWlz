@@ -1,8 +1,8 @@
-use std::{cell::Cell, collections::{HashMap, HashSet}, sync::{Arc, Mutex, RwLock, atomic::{AtomicUsize, Ordering}}};
+use std::{cell::Cell, collections::{HashMap, HashSet}, fmt, sync::{Arc, Mutex, RwLock, atomic::{AtomicUsize, Ordering}}};
 
-use Utilities::device::Device::Device;
+use Utilities::{Utilities::Quartile, device::Device::Device};
 
-use crate::{dtype::Float, error::{Result, TensorError}, tensor::Tensor};
+use crate::{dtype::Float, error::{Result, TensorError}, layout::{normalize_dim, normalize_dim_inclusive}, par, tensor::Tensor};
 
 #[cfg(feature = "parallel")]
 fn join<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B + Send) -> (A, B) { rayon::join(a, b) }
@@ -80,6 +80,13 @@ pub fn split_ratio<T: Float>(a: &Tensor<T>, b: &Tensor<T>, greater: bool) -> Res
 /// Ref Counted node handle for a tensor
 #[derive(Clone)]
 pub struct Comp<T: Float>(Arc<Node<T>>);
+
+impl<T: Float> fmt::Debug for Comp<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Comp(data={}, requires_grad={}, has_grad={}, leaf={})", self.data(), self.requires_grad(), self.grad().is_some(), self.is_leaf())
+    }
+}
+
 
 impl<T: Float> Comp<T> {
 
@@ -282,7 +289,7 @@ impl<T: Float> Comp<T> {
     }
 
     /// Element wise max, share the grad equally
-    pub fn max(&self, o: &Comp<T>) -> Result<Self> {
+    pub fn maximum(&self, o: &Comp<T>) -> Result<Self> {
         let (a, b) = (self.data(), o.data());
         let y = a.maximum(&b)?;
         let (a2, b2) = (a.clone(), b.clone());
@@ -290,7 +297,7 @@ impl<T: Float> Comp<T> {
     }
 
     /// Element wise min, share the grad equally
-    pub fn min(&self, o: &Comp<T>) -> Result<Self> {
+    pub fn minimum(&self, o: &Comp<T>) -> Result<Self> {
         let (a, b) = (self.data(), o.data());
         let y = a.minimum(&b)?;
         let (a2, b2) = (a.clone(), b.clone());
@@ -580,19 +587,418 @@ impl<T: Float> Comp<T> {
 
     /// make softsign comp
     /// y = a / (1 + |a|)
-    /// dy/da = 
     pub fn softsign(&self) -> Result<Self> { 
         self.div(&self.abs()?.add_scalar(T::one())?) 
     }
 
     /// make mish comp
     /// y = a * tanh(softplus(a))
-    /// compliated derivative
-    // Used ai  
     pub fn mish(&self) -> Result<Self> { 
         self.mul(&self.softplus()?.tanh()?) 
     }
 
 
+    // Naive prop impls simply to handle such fxn in comp graph
+    // Since these ops will be indirectly a part of the comp graph so we need rules for forawrd andf backward pass
+    // i,e x -> reshape -> y then whne going from y -> reshape -> x hence we need comps for such non differntial comps
+    // Used ai assistance to quickly add 
+
+    pub fn tril(&self, diagonal: isize) -> Result<Self> { self.lin(move |t| t.tril(diagonal)) }
+    pub fn triu(&self, diagonal: isize) -> Result<Self> { self.lin(move |t| t.triu(diagonal)) }
+    pub fn lower_triangle(&self) -> Result<Self> { self.tril(0) }
+    pub fn upper_triangle(&self) -> Result<Self> { self.triu(0) }
+    pub fn alt_tril(&self, diagonal: isize) -> Result<Self> { self.lin(move |t| t.alt_tril(diagonal)) }
+    pub fn alt_triu(&self, diagonal: isize) -> Result<Self> { self.lin(move |t| t.alt_triu(diagonal)) }
+    pub fn alt_lower_triangle(&self) -> Result<Self> { self.alt_tril(0) }
+    pub fn alt_upper_triangle(&self) -> Result<Self> { self.alt_triu(0) }
+
+    pub fn reshape(&self, shape: &[isize]) -> Result<Self> {
+        let x = self.data();
+        let y = x.reshape(shape)?;
+        // Same reshape op applied in both directions
+        Ok(self.un(y, move |g| g.reshape(&x.shape().iter().map(|&s| s as isize).collect::<Vec<isize>>())))
+    }
+
+    pub fn flatten(&self) -> Result<Self> { 
+        self.reshape(&[self.numel() as isize]) 
+    }
+
+    pub fn transpose(&self, d0: isize, d1: isize) -> Result<Self> { 
+        Ok(self.un(self.data().transpose(d0, d1)?, move |g| g.transpose(d0, d1))) 
+    }
+
+    pub fn t(&self) -> Result<Self> { 
+        self.transpose(-2, -1) 
+    }
+
+    pub fn permute(&self, dims: &[usize]) -> Result<Self> {
+        let y = self.data().permute(dims)?;
+        // Revert the permutation
+        let mut inv = vec![0usize; dims.len()];
+        for (i, &d) in dims.iter().enumerate() { inv[d] = i; }
+        Ok(self.un(y, move |g| g.permute(&inv)))
+    }
+
+    pub fn unsqueeze(&self, dim: isize) -> Result<Self> {
+        let x = self.data();
+        let d = normalize_dim_inclusive(dim, x.ndim())?;
+        let y = x.unsqueeze(dim)?;
+        Ok(self.un(y, move |g| g.squeeze(d as isize)))
+    }
+
+    pub fn squeeze(&self, dim: isize) -> Result<Self> {
+        let x = self.data();
+        let d = normalize_dim(dim, x.ndim())?;
+        let y = x.squeeze(dim)?;
+        Ok(self.un(y, move |g| g.unsqueeze(d as isize)))
+    }
+
+    pub fn squeeze_all(&self) -> Result<Self> {
+        self.reshape(& self.shape().iter().copied().filter(|&s| s != 1).map(|s| s as isize).collect::<Vec<isize>>())
+    }
+
+    pub fn broadcast_to(&self, shape: &[usize]) -> Result<Self> {
+        let x = self.data();
+        Ok(self.un(x.broadcast_to(shape)?, move |g| unbroadcast(g.clone(), &x.shape().to_vec())))
+    }
+    pub fn expand(&self, shape: &[usize]) -> Result<Self> {  self.broadcast_to(shape) }
+
+
+    pub fn flip(&self, dim: isize) -> Result<Self> { 
+        Ok(self.un(self.data().flip(dim)?, move |g| g.flip(dim))) 
+    }
+
+    pub fn narrow(&self, dim: isize, start: usize, len: usize) -> Result<Self> {
+        let x = self.data();
+        let y = x.narrow(dim, start, len)?;
+        let d = normalize_dim(dim, x.ndim())?;
+        let sh = x.shape().to_vec();
+        Ok(self.un(y, move |g| {
+            let mk = |l: usize| { let mut s = sh.clone(); s[d] = l; Tensor::<T>::zeros(&s).on(g.device()) };
+            let mut parts: Vec<Tensor<T>> = Vec::new();
+            if start > 0 { parts.push(mk(start)?); }
+            parts.push(g.clone());
+            if sh[d] - start - len > 0 { parts.push(mk(sh[d] - start - len)?); }
+            Tensor::cat(& parts.iter().collect::<Vec<&Tensor<T>>>(), d as isize)
+        }))
+    }
+
+    pub fn select(&self, dim: isize, index: usize) -> Result<Self> { 
+        self.narrow(dim, index, 1)?.squeeze(dim) 
+    }
+
+    pub fn split(&self, dim: isize, size: usize) -> Result<Vec<Self>> {
+        let d = normalize_dim(dim, self.ndim())?;
+        let n = self.shape()[d];
+        (0..n).step_by(size.max(1)).map(|s| self.narrow(d as isize, s, size.min(n - s))).collect()
+    }
+
+    pub fn cat(vars: &[&Comp<T>], dim: isize) -> Result<Self> {
+        let ts: Vec<Tensor<T>> = vars.iter().map(|v| v.data()).collect();
+        let refs: Vec<&Tensor<T>> = ts.iter().collect();
+        let y = Tensor::cat(&refs, dim)?;
+        let d = normalize_dim(dim, y.ndim())?;
+        let sizes: Vec<usize> = ts.iter().map(|t| t.shape()[d]).collect();
+        Ok(Self::from_op(y, vars.iter().map(|v| (*v).clone()).collect(), move |g| {
+            let (mut off, mut out) = (0, Vec::with_capacity(sizes.len()));
+            for &s in &sizes { out.push(Some(g.narrow(d as isize, off, s)?.compact()?)); off += s; }
+            Ok(out)
+        }))
+    }
+
+    pub fn stack(vars: &[&Comp<T>], dim: isize) -> Result<Self> {
+        let first = *vars.first().ok_or_else(|| TensorError::InvalidShape("No Comps provided to stack".into()))?;
+        let d = normalize_dim_inclusive(dim, first.ndim())? as isize;
+        let ex: Vec<Comp<T>> = vars.iter().map(|v| v.unsqueeze(d)).collect::<Result<_>>()?;
+        let refs: Vec<&Comp<T>> = ex.iter().collect();
+        Self::cat(&refs, d)
+    }
+
+    /// Gather slices along dim in forward, idx accumulate in backward
+    pub fn index_select(&self, dim: isize, indices: &[usize]) -> Result<Self> {
+        let x = self.data();
+        let d = normalize_dim(dim, x.ndim())?;
+        let y = x.index_select(dim, indices)?;
+        let (sh, idx) = (x.shape().to_vec(), indices.to_vec());
+        Ok(self.un(y, move |g| {
+            let (outer, inner, n, k) = (sh[..d].iter().product::<usize>(), sh[d + 1..].iter().product::<usize>(), sh[d], idx.len());
+            let gv = g.to_vec()?;
+            let mut out = vec![T::zero(); outer * n * inner];
+            par::for_each_row(&mut out, n * inner, k * inner, |o, row| {
+                for (j, &i) in idx.iter().enumerate() {
+                    let src = &gv[(o * k + j) * inner..(o * k + j + 1) * inner];
+                    for q in 0..inner { row[i * inner + q] += src[q]; }
+                }});
+            Tensor::from_vec(out, &sh)?.to_device(g.device())
+        }))
+    }
+
+    
+    pub fn sum(&self, dim: isize, keepdim: bool) -> Result<Self> {
+        let x = self.data();
+        let d = normalize_dim(dim, x.ndim())?;
+        Ok(self.un(x.sum(dim, keepdim)?, move |g| expand_to(&keep(g, d, keepdim)?, &x.shape().to_vec())))
+    }
+
+    pub fn mean(&self, dim: isize, keepdim: bool) -> Result<Self> {
+        self.sum(dim, keepdim)?.div_scalar(T::from_f64( self.shape()[normalize_dim(dim, self.ndim())?] as f64))
+    }
+
+    pub fn extreme(&self, dim: isize, keepdim: bool, is_max: bool) -> Result<Self> {
+        let x = self.data();
+        let d = normalize_dim(dim, x.ndim())?;
+        let y = if is_max { x.max(dim, keepdim)? } else { x.min(dim, keepdim)? };
+        let yk = keep(&y, d, keepdim)?;
+        Ok(self.un(y, move |g| { let m = x.eq_t(&yk)?; let n = m.sum(d as isize, true)?; m.mul(&keep(g, d, keepdim)?)?.div(&n) }))
+    }
+
+    /// Max over dim, ties share the grad equally
+    pub fn max(&self, dim: isize, keepdim: bool) -> Result<Self> { self.extreme(dim, keepdim, true) }
+
+    /// Min over dim, ties share the grad equally
+    pub fn min(&self, dim: isize, keepdim: bool) -> Result<Self> { self.extreme(dim, keepdim, false) }
+
+    /// Product over dim
+    pub fn prod(&self, dim: isize, keepdim: bool) -> Result<Self> {
+        let x = self.data();
+        let d = normalize_dim(dim, x.ndim())?;
+        let y = x.prod(dim, keepdim)?;
+        let sh = x.shape().to_vec();
+        Ok(self.un(y, move |g| {
+            let n = sh[d];
+            let xm = x.movedim_last(d)?.host_data()?.into_owned();
+            let gv = g.to_vec()?;
+            let mut out = vec![T::zero(); xm.len()];
+            par::for_each_row(&mut out, n, n, |i, row| {
+                let xs = &xm[i * n..(i + 1) * n];
+                let mut pre = T::one();
+                for j in 0..n { row[j] = pre; pre = pre * xs[j]; }
+                let mut suf = T::one();
+                for j in (0..n).rev() { row[j] = row[j] * suf * gv[i]; suf = suf * xs[j]; }
+            });
+            rows_to_tensor(out, &sh, d)?.to_device(g.device())
+        }))
+    }
+
+    pub fn sum_all(&self) -> Result<Self> { self.flatten()?.sum(0, false) }
+    pub fn mean_all(&self) -> Result<Self> { self.flatten()?.mean(0, false) }
+    pub fn max_all(&self) -> Result<Self> { self.flatten()?.max(0, false) }
+    pub fn min_all(&self) -> Result<Self> { self.flatten()?.min(0, false) }
+    pub fn prod_all(&self) -> Result<Self> { self.flatten()?.prod(0, false) }
+    pub fn range(&self, dim: isize) -> Result<Self> { self.max(dim, true)?.sub(&self.min(dim, true)?) }
+    pub fn range_all(&self) -> Result<Self> { self.max_all()?.sub(&self.min_all()?) }
+
+
+    pub fn percentile(&self, p: f64, dim: isize, keepdim: bool) -> Result<Self> {
+        let x = self.data();
+        let d = normalize_dim(dim, x.ndim())?;
+        let y = x.percentile(p, dim, keepdim)?;
+        let sh = x.shape().to_vec();
+        Ok(self.un(y, move |g| {
+            let n = sh[d];
+            let xm = x.movedim_last(d)?.host_data()?.into_owned();
+            let gv = g.to_vec()?;
+            let mut out = vec![T::zero(); xm.len()];
+            let rank = (p / 100.0).clamp(0.0, 1.0) * (n.max(1) - 1) as f64;
+            let (lo, hi) = (rank.floor() as usize, rank.ceil() as usize);
+            let fr = rank - lo as f64;
+            par::for_each_row(&mut out, n, n, |i, row| {
+                let xs = &xm[i * n..(i + 1) * n];
+                let mut idx: Vec<usize> = (0..n).collect();
+                idx.sort_by(|&a, &b| xs[a].partial_cmp(&xs[b]).unwrap_or(std::cmp::Ordering::Equal));
+                row[idx[lo]] += gv[i] * T::from_f64(1.0 - fr);
+                row[idx[hi]] += gv[i] * T::from_f64(fr);
+            });
+            rows_to_tensor(out, &sh, d)?.to_device(g.device())
+        }))
+    }
+
+    pub fn median(&self, dim: isize, keepdim: bool) -> Result<Self> { self.percentile(50.0, dim, keepdim) }
+
+    pub fn percentile_all(&self, p: f64) -> Result<Self> { self.flatten()?.percentile(p, 0, false) }
+
+    pub fn median_all(&self) -> Result<Self> { self.percentile_all(50.0) }
+
+    pub fn quartile(&self, dim: isize, qtile: Quartile) -> Result<Self> {
+        let pct = match qtile { Quartile::Q1 => 25, Quartile::Q2 => 50, Quartile::Q3 => 75, Quartile::Q(x) => x.clamp(0, 100) } as f64;
+        self.percentile(pct, dim, true)
+    }
+
+    pub fn quartile_all(&self, qtile: Quartile) -> Result<Self> { self.flatten()?.quartile(0, qtile)?.reshape(&[]) }
+
+    pub fn iqr(&self, dim: isize) -> Result<Self> { self.quartile(dim, Quartile::Q3)?.sub(&self.quartile(dim, Quartile::Q1)?) }
+
+    pub fn iqr_all(&self) -> Result<Self> { self.quartile_all(Quartile::Q3)?.sub(&self.quartile_all(Quartile::Q1)?) }
+
+    pub fn var(&self, dim: isize, keepdim: bool, is_sample: bool) -> Result<Self> {
+        let n = self.shape()[normalize_dim(dim, self.ndim())?];
+        let denom = if is_sample { n.saturating_sub(1) } else { n }.max(1);
+        self.sub(&self.mean(dim, true)?)?.square()?.sum(dim, keepdim)?.div_scalar(T::from_f64(denom as f64))
+    }
+
+    pub fn std(&self, dim: isize, keepdim: bool, is_sample: bool) -> Result<Self> { self.var(dim, keepdim, is_sample)?.sqrt() }
+
+    pub fn var_all(&self, is_sample: bool) -> Result<Self> { self.flatten()?.var(0, false, is_sample) }
+
+    pub fn std_all(&self, is_sample: bool) -> Result<Self> { self.var_all(is_sample)?.sqrt() }
+
+    pub fn coeff_of_var(&self, dim: isize, is_sample: bool) -> Result<Self> { self.std(dim, true, is_sample)?.div(&self.mean(dim, true)?)?.mul_scalar(T::from_f64(100.0)) }
+
+    pub fn coeff_of_var_all(&self, is_sample: bool) -> Result<Self> { self.std_all(is_sample)?.div(&self.mean_all()?)?.mul_scalar(T::from_f64(100.0)) }
+
+    pub fn mag(&self) -> Result<Self> { self.square()?.sum_all()?.sqrt() }
+
+    pub fn cov(&self, other: &Self) -> Result<Self> {
+        if self.numel() != other.numel() { return Err(TensorError::ShapeMismatch { op: "cov", lhs: self.shape(), rhs: other.shape() }); }
+        let (a, b) = (self.flatten()?, other.flatten()?);
+        let prod = a.sub(&a.mean_all()?)?.mul(&b.sub(&b.mean_all()?)?)?;
+        prod.sum_all()?.div_scalar(T::from_f64((a.numel().max(2) - 1) as f64))
+    }
+
+    pub fn pearson(&self, other: &Self) -> Result<Self> { self.cov(other)?.div(&self.std_all(true)?.mul(&other.std_all(true)?)?) }
+
+    pub fn corr(&self, other: &Self) -> Result<Self> { self.pearson(other) }
+
+    pub fn cov_matrix(&self) -> Result<Self> {
+        if self.ndim() != 2 { return Err(TensorError::InvalidShape("Covariance matrix works for only 2D tensors ".into())); }
+        let n = self.shape()[0];
+        let c = self.sub(&self.mean(0, true)?)?;
+        c.t()?.matmul(&c)?.div_scalar(T::from_f64((n.max(2) - 1) as f64))
+    }
+
+    pub fn corrcoef(&self) -> Result<Self> {
+        let c = self.cov_matrix()?;
+        let d = c.diag()?.sqrt()?;
+        c.div(&d.unsqueeze(1)?.mul(&d.unsqueeze(0)?)?)
+    }
+
+    pub fn corr_mat(&self) -> Result<Self> { self.corrcoef() }
+
+    pub fn skewness(&self) -> Result<Self> { self.sub(&self.mean_all()?)?.div(&self.std_all(true)?)?.powi32(3)?.mean_all() }
+
+    pub fn kurtosis(&self) -> Result<Self> { self.sub(&self.mean_all()?)?.div(&self.std_all(true)?)?.powi32(4)?.mean_all() }
+
+    pub fn skewness_all(&self, is_sample: bool, dim: isize) -> Result<Self> { self.sub(&self.mean(dim, true)?)?.div(&self.std(dim, true, is_sample)?)?.powi32(3)?.mean(dim, false) }
+
+    pub fn kurtosis_all(&self, is_sample: bool, dim: isize) -> Result<Self> { self.sub(&self.mean(dim, true)?)?.div(&self.std(dim, true, is_sample)?)?.powi32(4)?.mean(dim, false) }
+
+    pub fn matmul_nd(&self, o: &Comp<T>) -> Result<Self> {
+        let (a, b) = (self.data(), o.data());
+        let y = a.matmul(&b)?;
+        Ok(self.bin(o, y, move |g| g.matmul(&b.t()?), move |g| a.t()?.matmul(g)))
+    }
+
+    pub fn matmul(&self, o: &Comp<T>) -> Result<Self> {
+        let (sa, sb) = (self.ndim() == 1, o.ndim() == 1);
+        let a = if sa { self.unsqueeze(0)? } else { self.clone() };
+        let b = if sb { o.unsqueeze(1)? } else { o.clone() };
+        let r = a.matmul_nd(&b)?;
+        if sa && sb { r.reshape(&[]) } else if sa { r.squeeze(-2) } else if sb { r.squeeze(-1) } else { Ok(r) }
+    }
+
+    pub fn dot(&self, o: &Comp<T>) -> Result<Self> {
+        if self.shape().last() != o.shape().last() || self.ndim() == 0 { return Err(TensorError::ShapeMismatch { op: "Dot", lhs: self.shape(), rhs: o.shape() }); }
+        self.mul(o)?.sum(-1, false)
+    }
+
+    pub fn cross(&self, o: &Comp<T>) -> Result<Self> {
+        if self.shape().last() != Some(&3) || o.shape().last() != Some(&3) { return Err(TensorError::ShapeMismatch { op: "Cross", lhs: self.shape(), rhs: o.shape() }); }
+        let (a0, a1, a2) = (self.select(-1, 0)?, self.select(-1, 1)?, self.select(-1, 2)?);
+        let (b0, b1, b2) = (o.select(-1, 0)?, o.select(-1, 1)?, o.select(-1, 2)?);
+        let c0 = a1.mul(&b2)?.sub(&a2.mul(&b1)?)?;
+        let c1 = a2.mul(&b0)?.sub(&a0.mul(&b2)?)?;
+        let c2 = a0.mul(&b1)?.sub(&a1.mul(&b0)?)?;
+        Self::stack(&[&c0, &c1, &c2], -1)
+    }
+
+    pub fn outer(&self, o: &Comp<T>) -> Result<Self> {
+        if self.ndim() != 1 || o.ndim() != 1 { return Err(TensorError::InvalidShape("Outer expects 1D tensors".into())); }
+        self.unsqueeze(1)?.mul(&o.unsqueeze(0)?)
+    }
+
+    pub fn diag(&self) -> Result<Self> {
+        let x = self.data();
+        let y = x.diag()?;
+        let sh = x.shape().to_vec();
+        Ok(self.un(y, move |g| {
+            if sh.len() == 1 { g.diag() } else { let gv = g.to_vec()?; Tensor::from_fn(&sh, |ix| if ix[0] == ix[1] { gv[ix[0]] } else { T::zero() }).to_device(g.device()) }
+        }))
+    }
+    
+    pub fn trace(&self) -> Result<Self> {
+        if self.ndim() != 2 { return Err(TensorError::InvalidShape("Trace expects a 2D tensor".into())); }
+        self.diag()?.sum(0, false)
+    }
+    
+    pub fn inv(&self) -> Result<Self> {
+        let y = self.data().inv()?;
+        let yc = y.clone();
+        Ok(self.un(y, move |g| { let yt = yc.t()?; yt.matmul(g)?.matmul(&yt)?.neg() }))
+    }
+    
+    pub fn det(&self) -> Result<Self> {
+        let x = self.data();
+        let d = x.det()?;
+        let y = Tensor::scalar(d).on(x.device())?;
+        Ok(self.un(y, move |g| x.inv()?.t()?.mul_scalar(d)?.mul(g)))
+    }
+    
+    pub fn solve(&self, b: &Comp<T>) -> Result<Self> {
+        let (a, bt) = (self.data(), b.data());
+        let x = a.solve(&bt)?;
+        let xc = x.clone();
+        let (a2, vec_rhs) = (a.clone(), bt.ndim() == 1);
+        Ok(self.bin(b, x, move |g| {
+            let gb = a.t()?.solve(g)?;
+            let (gb2, x2) = if vec_rhs { (gb.unsqueeze(1)?, xc.unsqueeze(1)?) } else { (gb, xc.clone()) };
+            gb2.matmul(&x2.t()?)?.neg()
+        }, move |g| a2.t()?.solve(g)))
+    }
+
+
+    pub fn norm(&self, p: f64, dim: isize, keepdim: bool) -> Result<Self> {
+        if p.abs() <= 0.01 { return Err(TensorError::Custom(format!("Norm of {} is too close to zero and wil lead to unstable exponentiation", p))); }
+        let a = self.abs()?;
+        if p.is_infinite() { a.max(dim, keepdim) }
+        else if p == 1.0 { a.sum(dim, keepdim) }
+        else if p == 2.0 { self.square()?.sum(dim, keepdim)?.sqrt() }
+        else { a.powf(T::from_f64(p))?.sum(dim, keepdim)?.powf(T::from_f64(1.0 / p)) }
+    }
+
+    pub fn normalize(&self, dim: isize) -> Result<Self> { let n = self.norm(2.0, dim, true)?.add_scalar(T::from_f64(1e-12))?; self.div(&n) }
+
+    pub fn cosine_similarity(&self, o: &Comp<T>, dim: isize) -> Result<Self> { self.normalize(dim)?.mul(&o.normalize(dim)?)?.sum(dim, false) }
+
+    pub fn pdim_dist(&self, o: &Comp<T>, p: f64, dim: isize, keepdim: bool) -> Result<Self> { self.sub(o)?.norm(p, dim, keepdim) }
+
+    pub fn manhatten(&self, o: &Comp<T>, dim: isize) -> Result<Self> { self.sub(o)?.norm(1.0, dim, true) }
+
+    pub fn euclidean(&self, o: &Comp<T>, dim: isize) -> Result<Self> { self.sub(o)?.norm(2.0, dim, true) }
+
+    pub fn softmax(&self, dim: isize) -> Result<Self> {
+        let y = self.data().softmax(dim)?;
+        let yc = y.clone();
+        Ok(self.un(y, move |g| { let s = g.mul(&yc)?.sum(dim, true)?; yc.mul(&g.sub(&s)?) }))
+    }
+
+    pub fn logsumexp(&self, dim: isize, keepdim: bool) -> Result<Self> {
+        let x = self.data();
+        let d = normalize_dim(dim, x.ndim())?;
+        let y = x.logsumexp(dim, keepdim)?;
+        Ok(self.un(y, move |g| keep(g, d, keepdim)?.mul(&x.softmax(dim)?)))
+    }
+    
+    pub fn log_softmax(&self, dim: isize) -> Result<Self> { self.sub(&self.logsumexp(dim, true)?) }
+    
+    pub fn layer_norm(&self, eps: T) -> Result<Self> {
+        let x = self.data();
+        let y = x.layer_norm(eps)?;
+        let yc = y.clone();
+        Ok(self.un(y, move |g| {
+            let sigma = x.var(-1, true, false)?.add_scalar(eps)?.sqrt()?;
+            let (mg, mgy) = (g.mean(-1, true)?, g.mul(&yc)?.mean(-1, true)?);
+            g.sub(&mg)?.sub(&yc.mul(&mgy)?)?.div(&sigma)
+        }))
+    }
 
 }
