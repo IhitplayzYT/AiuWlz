@@ -29,6 +29,12 @@ pub fn no_grad<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+pub fn with_grad<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = GradGuard(GRAD_ON.with(|g| g.replace(true)));
+    f()
+}
+
+
 /// Backward pass fxn closure type
 /// Takes grad of output and returns grad to parent
 /// If no parent no need to autograd them (Doesnt grad on the starting input to the comp graph)
