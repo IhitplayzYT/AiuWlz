@@ -20,7 +20,6 @@ impl std::fmt::Debug for DataFrame {
     }
 }
 
-
 impl DataFrame {
 
     /// Create a new DataFrame from Polars DataFrame

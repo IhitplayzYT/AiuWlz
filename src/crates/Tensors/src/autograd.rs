@@ -508,6 +508,24 @@ impl<T: Float> Comp<T> {
         Ok(self.un(y, move |g| g.mul(&x.gt(&x.zeros_like())?.mul_scalar(T::one() - alpha)?.add_scalar(alpha)?)))
     }
 
+    /// make prelu comp
+    /// y = {x > 0 -> x, else -> alpha * x}
+    /// dy/dx = {x > 0 -> 1, else -> alpha}
+    /// dy/dalpha = {x > 0 -> 0, else -> x}
+    pub fn prelu(&self, alpha: &Comp<T>) -> Result<Self> {
+        let x = self.data();
+        let x_clone = x.clone();
+        let a = alpha.data();
+        let (shape_x, shape_a) = (x.shape().to_vec(), a.shape().to_vec());
+        let a_broadcasted = a.broadcast_to(&shape_x)?;
+        let y = x.where_cond(&x.mul(&a_broadcasted)?, &x)?;
+        Ok(self.bin(alpha, y, move |g| {
+            g.mul(& x.ones_like().where_cond(&a_broadcasted, &x.zeros_like())?)
+        }, move |g| {
+            unbroadcast(g.mul(&x_clone.zeros_like().where_cond(&x_clone, &&x_clone.zeros_like())?)?, &shape_a)
+        }))
+    }
+
     /// make gelu comp
     // made usign ai
     pub fn gelu(&self) -> Result<Self> {

@@ -1,5 +1,6 @@
+use Tensors::{dtype::Float, tensor::Tensor};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-use std::fmt::{self, Display};
+use std::{fmt::{self, Display}, hash::{DefaultHasher, Hasher}};
 
 // Enum for dataframe types
 #[derive(Clone, Debug, PartialEq)]
@@ -20,12 +21,51 @@ pub enum DataValue {
     Date(NaiveDate),
     DateTime(NaiveDateTime),
     Time(NaiveTime),
+    Vec(Vec<f64>)
 }
 
 impl DataValue {
     /// Check if numeric for tensor conversion
     pub fn is_numeric(&self) -> bool {
         matches!(self, DataValue::Int8(_) | DataValue::Int16(_) | DataValue::Int32(_) | DataValue::Int64(_) | DataValue::UInt8(_) | DataValue::UInt16(_) | DataValue::UInt32(_) | DataValue::UInt64(_) | DataValue::Float32(_) | DataValue::Float64(_))
+    }
+
+    pub fn is_tensorizable(&self) -> bool{
+        matches!(self,DataValue::Vec(_))
+    }
+
+    pub fn id(&self,hsher:&mut DefaultHasher) -> u64{
+        let date_buf;
+        let datetime_buf;
+        let time_buf;
+        let mut bt = vec![];
+        let k = match self{
+            DataValue::Null => {"5863e54a8654d191ee7d2d8c5f6d946d173e066b6ebc5763244ca255eef2a0af1a0d3ccdb2772a9dc13f27b11783eb30c68175fbf1d51c017ceead5906ea47555l".as_bytes()}, // Random hash so strings id dont collide with Null
+            DataValue::Bool(v) => { if *v { &[b'1']} else{&[b'0']}},
+            DataValue::String(v) => {v.as_bytes()},
+            DataValue::Date(v) => {date_buf = v.to_string();date_buf.as_bytes()},
+            DataValue::DateTime(v) => {datetime_buf = v.to_string();datetime_buf.as_bytes()},
+            DataValue::Time(v) => {time_buf = v.to_string();time_buf.as_bytes()},
+            DataValue::Int8(v) => {&[*v as u8]},
+            DataValue::Int16(v) => {&[(*v & 0x0F) as u8,(*v & 0xFF) as u8]},
+            DataValue::Int32(v) => {&[(*v & 0x000F) as u8,(*v & 0x00F0) as u8,(*v & 0x0F00) as u8,(*v & 0xF000) as u8]},
+            DataValue::Int64(v) => {&[(*v & 0x0000000f) as u8,(*v & 0x000000f0) as u8,(*v & 0x00000f00) as u8,(*v & 0x0000f000) as u8,(*v & 0x000f0000) as u8,(*v & 0x00f00000) as u8,(*v & 0x0f000000) as u8,(*v & 0xf0000000) as u8]},
+            DataValue::UInt8(v) => { &[*v] },
+            DataValue::UInt16(v) => {&[(*v & 0x0F) as u8,(*v & 0xFF) as u8]},
+            DataValue::UInt32(v) =>{&[(*v & 0x000F) as u8,(*v & 0x00F0) as u8,(*v & 0x0F00) as u8,(*v & 0xF000) as u8]},
+            DataValue::UInt64(v) =>{&[(*v & 0x0000000f) as u8,(*v & 0x000000f0) as u8,(*v & 0x00000f00) as u8,(*v & 0x0000f000) as u8,(*v & 0x000f0000) as u8,(*v & 0x00f00000) as u8,(*v & 0x0f000000) as u8,(*v & 0xf0000000) as u8]},
+            DataValue::Float32(v) =>{let v = v.to_bits();&[(v & 0x000F) as u8,(v & 0x00F0) as u8,(v & 0x0F00) as u8,(v & 0xF000) as u8]},
+            DataValue::Float64(v) =>{let v = v.to_bits();&[(v & 0x0000000f) as u8,(v & 0x000000f0) as u8,(v & 0x00000f00) as u8,(v & 0x0000f000) as u8,(v & 0x000f0000) as u8,(v & 0x00f00000) as u8,(v & 0x0f000000) as u8,(v & 0xf0000000) as u8]},
+            DataValue::Vec(v) => {
+                for c in v{
+                    let c = c.to_bits();
+                    bt.append(&mut vec![(c & 0x0000000f) as u8,(c & 0x000000f0) as u8,(c & 0x00000f00) as u8,(c & 0x0000f000) as u8,(c & 0x000f0000) as u8,(c & 0x00f00000) as u8,(c & 0x0f000000) as u8,(c & 0xf0000000) as u8]);
+                }
+                &bt   
+            }
+            };
+        hsher.write(k);
+        hsher.finish()
     }
 
     /// Convert to f64 if numeric
@@ -64,6 +104,7 @@ impl DataValue {
             DataValue::Date(_) => "date",
             DataValue::DateTime(_) => "datetime",
             DataValue::Time(_) => "time",
+            DataValue::Vec(_) => "vec"
         }
     }
 }
@@ -87,6 +128,7 @@ impl Display for DataValue {
             DataValue::Date(v) => write!(f, "{}", v),
             DataValue::DateTime(v) => write!(f, "{}", v),
             DataValue::Time(v) => write!(f, "{}", v),
+            DataValue::Vec(v) => write!(f, "{:?}", v),
         }
     }
 }
@@ -120,11 +162,15 @@ impl DataColumn {
     /// Check if all vals in column are numeric
     pub fn is_numeric(&self) -> bool { self.values.iter().all(|v| v.is_numeric() || matches!(v, DataValue::Null))}
 
+    /// Check if all vals in column are numeric
+    pub fn is_tensorizable(&self) -> bool { self.values.iter().all(|v| v.is_tensorizable() || matches!(v, DataValue::Null))}
+
     /// Get numeric values as f64, skipping nulls
     pub fn as_numeric_f64(&self) -> Result<Vec<Option<f64>>, crate::error::DataloaderError> {
         if !self.is_numeric() { return Err(crate::error::DataloaderError::Conversion(format!("Column '{}' is not numeric",self.name))); }
         Ok(self.values.iter().map(|v| v.as_f64()).collect())
     }
+
 }
 
 /// Options for loading data from csv and excels

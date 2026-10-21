@@ -12,6 +12,24 @@ pub fn with_grad(input: TokenStream) -> TokenStream{
     }.into()
 }
 
+macro_rules! If {
+    ($expr:expr,$a:expr,$b:expr) => {
+        if $expr{
+            $a
+        }else{
+            $b
+        }
+    };
+    ($t1:ty,$t2:ty) => {
+        if $t1 == $t2 {
+            true
+        }else{
+            false
+        }
+    }
+}
+
+
 // #[proc_macro]
 // pub fn autograd(input: TokenStream) -> TokenStream{
 //     let parsed = parse_macro_input!(input as Block);

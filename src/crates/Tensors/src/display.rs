@@ -1,6 +1,6 @@
 use crate::dtype::Element;
 use crate::tensor::Tensor;
-use std::fmt::{self, Display};
+use std::{error::Error, fmt::{self, Display}};
 
 const EDGE: usize = 3;
 
@@ -42,6 +42,29 @@ impl<T: Element> Display for Tensor<T> {
         }
     }
 }
+
+impl <T:Element> Tensor<T>{
+
+    /// Raw print of tensor no trunctation
+    pub fn rprint(t: &Tensor<T>) -> Result<(),Box<dyn Error>>{
+        let (data,shape) = (&*t.host_data()?,t.shape());
+        _raw_fmt_helper(data, shape, 0)
+    }
+    
+}
+
+fn _raw_fmt_helper<T: Element>(data: &[T], shape: &[usize], depth: usize) -> Result<(), Box<dyn Error>> {
+    if shape.is_empty() { println!("{}", data[0]);return Ok(()) }
+    let n = shape[0];
+    let inner: usize = shape[1..].iter().product();
+    let sep = if shape.len() > 1 { format!(",\n{}", " ".repeat(depth + 8)) } else { ", ".to_string() };
+    println!("[");
+    let show = |i: usize| _raw_fmt_helper(&data[i * inner..(i + 1) * inner], &shape[1..], depth + 1);
+    for i in 0..n { show(i)?; if i + 1 < n { println!("{sep}"); } }
+    println!("]");
+    return Ok(())
+}
+
 
 impl<T: Element> fmt::Debug for Tensor<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { 

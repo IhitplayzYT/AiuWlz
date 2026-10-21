@@ -1,9 +1,12 @@
+use std::collections::{HashMap, HashSet};
+use std::hash::DefaultHasher;
+
 use crate::error::{DataloaderError, Result};
 use crate::types::{DataColumn, DataValue};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use polars::prelude::*;
 use Tensors::tensor::Tensor;
-use Tensors::dtype::Element;
+use Tensors::dtype::{Element, Float};
 
 /// Convert Polars Series to DataColumn
 pub fn series_to_data_column(series: &Series) -> Result<DataColumn> {
@@ -230,7 +233,15 @@ pub fn data_column_to_series(column: &DataColumn) -> Result<Series> {
                     _ => None,
                 }).collect();
             Ok(Series::new(&column.name, vals))
-        }
+        },
+        DataValue::Vec(_) => {
+        let vals: Vec<Option<Vec<f64>>> = column.values.iter().map(|v| match v {
+                DataValue::Vec(t) => Some(t.clone()),
+                _ => None,
+            }).collect();
+            Ok(Series::new(&column.name, vals.iter().map(|v| {v.as_ref().map(|values| {Series::new("".into(), values.as_slice())})
+        }).collect::<Vec<Option<Series>>>()))
+    }
     }
 }
 
@@ -308,4 +319,55 @@ pub fn series_to_tensor_2d<T: Element>(series_vec: &[Series]) -> Result<Tensor<T
         }
     }
     Tensor::from_2d(data.chunks(m).map(|chunk| chunk.to_vec()).collect()).map_err(|x| DataloaderError::Tensor(format!("Tensor error: {x}")))
+}
+
+
+pub fn Onehot(c:&DataColumn) -> DataColumn{
+    let mut hsher = DefaultHasher::new();
+    let mut seen = HashSet::new();
+    c.values.iter().for_each(|x| { 
+        seen.insert(x.id(&mut hsher));
+    });
+    let l = seen.len();
+    let mp = seen.into_iter().enumerate().map(|(i,x)| {
+        let mut v = vec![0.0;l];
+        v[i] = 1.0;
+        (x,v)
+    }).collect::<HashMap<u64,Vec<f64>>>();
+    let mut k = Vec::with_capacity(c.len());
+    c.values.iter().enumerate().for_each(|(i,x)| { 
+        k[i] = DataValue::Vec(mp.get(&x.id(&mut hsher)).unwrap().clone());
+    });
+    
+    DataColumn::new(c.name.clone(),k)
+}
+
+pub fn Ordinal(c:&DataColumn) -> DataColumn{
+    let mut hsher = DefaultHasher::new();
+    let mut seen = HashSet::new();
+    c.values.iter().for_each(|x| { 
+        seen.insert(x.id(&mut hsher));
+    });
+    let l = seen.len();
+    let mp = seen.into_iter().enumerate().map(|(i,x)| {
+        (x,vec![(i+1) as f64])
+    }).collect::<HashMap<u64,Vec<f64>>>();
+
+    let mut k = Vec::with_capacity(c.len());
+    c.values.iter().enumerate().for_each(|(i,x)| { 
+        k[i] = DataValue::Vec(mp.get(&x.id(&mut hsher)).unwrap().clone());
+    });
+    
+    DataColumn::new(c.name.clone(),k)
+}
+
+
+pub fn col_to_tensor<T:Float>(c: &DataColumn) -> Result<Tensor<f64>>{
+   if c.is_tensorizable(){       
+        Ok(Tensor::from_2d( c.values.clone().into_iter().filter_map(|x| if matches!(x,DataValue::Vec(_)){Some(match x {DataValue::Vec(p) => p,_=>{panic!("Not possible")}})}else{None}).collect::<Vec<Vec<f64>>>()).map_err(|x|{ DataloaderError::Tensor(x.to_string())})?)
+   }else if c.is_numeric(){
+        Ok(Tensor::from_1d( c.values.clone().into_iter().filter_map(|x| if matches!(x,DataValue::Null){None}else{Some(x.as_f64().unwrap())}).collect::<Vec<f64>>()).map_err(|x|{ DataloaderError::Tensor(x.to_string())})?)
+   }else{
+    return Err(DataloaderError::InvalidDataType(c.name.clone(), "DataValue::Vec or DataValue::is_numeric() type".to_string(), "Non Tensorizable oir Non Numeirc".to_string()));
+   }
 }

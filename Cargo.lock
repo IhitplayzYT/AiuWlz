@@ -45,6 +45,9 @@ dependencies = [
 [[package]]
 name = "Metrics"
 version = "0.1.0"
+dependencies = [
+ "Tensors",
+]
 
 [[package]]
 name = "ModelSaveLoad"
