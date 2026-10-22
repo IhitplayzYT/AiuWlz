@@ -49,6 +49,10 @@ pub trait Element: _Element + Neg<Output = Self>{
     fn abs(self) -> Self {
         if self < Self::zero() { -self } else { self }
     }
+
+    fn sign(self) -> Self{
+        if self < Self::zero() { -Self::one()}else{Self::one()}
+    }
 }
 
 

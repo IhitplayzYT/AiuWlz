@@ -25,12 +25,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "Encoders"
-version = "0.1.0"
-
-[[package]]
 name = "MachineLearnModels"
 version = "0.1.0"
+dependencies = [
+ "Dataloader",
+ "Tensors",
+]
 
 [[package]]
 name = "Macro"

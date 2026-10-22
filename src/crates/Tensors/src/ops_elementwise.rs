@@ -370,7 +370,11 @@ impl<T: Float> Tensor<T> {
 
     /// Elu
     /// if x > 0 ? x : alpha * (e^x - 1)
-    pub fn  elu(&self,alpha:T) -> TensorResult<Self>{ self.map(|x| if x > T::zero() { x } else { alpha * (x.exp() - T::one()) })}
+    pub fn elu(&self,alpha:T) -> TensorResult<Self>{ self.map(|x| if x > T::zero() { x } else { alpha * (x.exp() - T::one()) })}
+
+    /// Heavside
+    /// if x >= 0 ? 1 : 0
+    pub fn heavside(&self) -> TensorResult<Self>{ self.map(|x| if x >= T::zero() { T::one() } else { T::zero() })}
 
     /// Leaky Relu
     pub fn lrelu(&self, alpha: T) -> TensorResult<Self> { self.unary_with(UnaryOp::Relu, |x| if x > T::zero() { x } else { alpha * x })}
@@ -384,6 +388,13 @@ impl<T: Float> Tensor<T> {
     /// Element wise power using integer exponent
     pub fn powi32(&self, n: i32) -> TensorResult<Self> { self.powf(T::from_f64(n as f64)) }
     pub fn powi64(&self, n: i64) -> TensorResult<Self> { self.powf(T::from_f64(n as f64)) }
+
+    /// Element wise sign of each comp in vector
+    pub fn sign(&self) -> TensorResult<Self> { self.map(T::sign) }
+    
+
+
+
 }
 
 macro_rules! impl_bin_ops {

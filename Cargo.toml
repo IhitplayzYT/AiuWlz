@@ -2,7 +2,6 @@
 members =[ 
     "src/crates/Algorithms",
     "src/crates/Dataloader",
-    "src/crates/Encoders",
     "src/crates/MachineLearnModels",
     "src/crates/Metrics",
     "src/crates/ModelSaveLoad",

@@ -527,7 +527,7 @@ impl<T: Float> Comp<T> {
     }
 
     /// make gelu comp
-    // made usign ai
+    // made using ai
     pub fn gelu(&self) -> Result<Self> {
         let x = self.data();
         let y = x.gelu()?;
@@ -554,6 +554,17 @@ impl<T: Float> Comp<T> {
             g.mul(&m.mul_scalar(lambda)?.add(&neg)?)
         }))
     }
+
+    /// Make heavside comp
+    /// y = {a >= 0 -> 1, else -> 1 }
+    /// dy/da = {a > o -> lambda,else -> lambda * alpha * e^a}
+    pub fn heavside(&self) -> Result<Self>{
+        let x = self.data();
+        let y = x.heavside()?;
+        let x_clone = x.clone();
+        Ok(self.un(y, move |g|{ g.mul(&Tensor::zeros(x_clone.shape())) }))
+    }
+
 
     /// Make elu comp
     /// y = {a > 0 -> a, else ->  alpha * (e^a - 1 ) }
