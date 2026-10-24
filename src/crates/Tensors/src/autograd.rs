@@ -741,12 +741,26 @@ impl<T: Float> Comp<T> {
         }))
     }
 
+    pub fn cat_with(&self,vars:&[&Comp<T>],dim:isize) -> Result<Self>{
+        let mut vars = vars.to_vec();
+        let c = self.clone();
+        vars.insert(0, &c);
+        Comp::<T>::cat(&vars, dim)
+    }
+
     pub fn stack(vars: &[&Comp<T>], dim: isize) -> Result<Self> {
         let first = *vars.first().ok_or_else(|| TensorError::InvalidShape("No Comps provided to stack".into()))?;
         let d = normalize_dim_inclusive(dim, first.ndim())? as isize;
         let ex: Vec<Comp<T>> = vars.iter().map(|v| v.unsqueeze(d)).collect::<Result<_>>()?;
         let refs: Vec<&Comp<T>> = ex.iter().collect();
         Self::cat(&refs, d)
+    }
+
+    pub fn stack_with(&self,vars:&[&Comp<T>],dim:isize) -> Result<Self>{
+        let mut vars = vars.to_vec();
+        let c = self.clone();
+        vars.insert(0, &c);
+        Comp::<T>::stack(&vars, dim)
     }
 
     /// Gather slices along dim in forward, idx accumulate in backward
@@ -847,6 +861,15 @@ impl<T: Float> Comp<T> {
             rows_to_tensor(out, &sh, d)?.to_device(g.device())
         }))
     }
+
+    pub fn p99(&self) -> Result<Self> { self.percentile(99.0, 0, true) }
+    pub fn p95(&self) -> Result<Self> { self.percentile(99.0, 0, true) }
+    pub fn p90(&self) -> Result<Self> { self.percentile(99.0, 0, true) }
+
+    pub fn p99_all(&self) -> Result<Self> { self.flatten()?.percentile(99.0, 0, false) }
+    pub fn p95_all(&self) -> Result<Self> { self.flatten()?.percentile(95.0, 0, false) }
+    pub fn p90_all(&self) -> Result<Self> { self.flatten()?.percentile(90.0, 0, false) }
+
 
     pub fn median(&self, dim: isize, keepdim: bool) -> Result<Self> { self.percentile(50.0, dim, keepdim) }
 

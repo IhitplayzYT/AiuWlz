@@ -54,6 +54,7 @@ pub fn broadcast_shapes(a: &[usize], b: &[usize]) -> TensorResult<Vec<usize>> {
 }
 
 impl Layout {
+    
     /// Make a contigious layout
     pub fn contiguous(shape: &[usize]) -> Self {
         Layout { shape: shape.to_vec(), strides: contiguous_strides(shape), offset: 0 }

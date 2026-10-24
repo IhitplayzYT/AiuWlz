@@ -423,6 +423,14 @@ impl<T: Element> Tensor<T> {
         Tensor::from_vec(out, &out_shape)?.to_device(first.device())
     }
 
+    // Create new Tensor by concatting with self
+    pub fn cat_with(&self,tensors: &[&Tensor<T>], dim: isize) -> Result<Self>{
+        let cl = self.clone();
+        let mut tensors = tensors.to_vec();
+        tensors.insert(0, &cl);
+        Tensor::<T>::cat(&tensors, dim)
+    } 
+
     /// Stacks tensor along a dim new dim
     pub fn stack(tensors: &[&Tensor<T>], dim: isize) -> Result<Self> {
         let first = *tensors.first().ok_or_else(|| TensorError::InvalidShape("No Tensors provided to stack".into()))?;
@@ -431,6 +439,14 @@ impl<T: Element> Tensor<T> {
         let refs: Vec<&Tensor<T>> = expanded.iter().collect();
         Self::cat(&refs, d) // Cat across th new dim
     }
+
+    // Create new Tensor by stackign with self
+    pub fn stack_with(&self,tensors: &[&Tensor<T>], dim: isize) -> Result<Self>{
+        let cl = self.clone();
+        let mut tensors = tensors.to_vec();
+        tensors.insert(0, &cl);
+        Tensor::<T>::stack(&tensors, dim)
+    } 
 
     /// Slice of indexes along dims
     pub fn index_select(&self, dim: isize, indices: &[usize]) -> Result<Self> {
@@ -445,4 +461,11 @@ impl<T: Element> Tensor<T> {
         let n = self.shape()[d];
         (0..n).step_by(size.max(1)).map(|s| self.narrow(d as isize, s, size.min(n - s))).collect()
     }
+
+    /// Len of tensor along a dim
+    pub fn len(&self,dim:isize) -> Result<usize>{
+        Ok(self.select(dim, 0)?.to_vec()?.len())
+    }
+
+
 }

@@ -65,6 +65,23 @@ impl<T: Element + PartialOrd> Tensor<T> {
         } as f64;
         self.percentile_all(pct)
     }
+
+
+    /// 99% confidence interval across a dim
+    pub fn p99(&self,  dim: isize, keepdim: bool) -> TensorResult<Self> { self.via_host(|t| t.reduce_with(dim, keepdim, |s| percentile_of(s, 99.0))) }
+    /// 95% confidence interval across a dim
+    pub fn p95(&self,  dim: isize, keepdim: bool) -> TensorResult<Self> { self.via_host(|t| t.reduce_with(dim, keepdim, |s| percentile_of(s, 95.0))) }
+    /// 90% confidence interval across a dim
+    pub fn p90(&self,  dim: isize, keepdim: bool) -> TensorResult<Self> { self.via_host(|t| t.reduce_with(dim, keepdim, |s| percentile_of(s, 90.0))) }
+
+
+    /// 99% confidence interval of all elems
+    pub fn p99_all(&self) -> TensorResult<T> { Ok(percentile_of(&self.host_data()?, 99.0)) }
+    /// 95% confidence interval of all elems
+    pub fn p95_all(&self) -> TensorResult<T> { Ok(percentile_of(&self.host_data()?, 95.0)) }
+    /// 90% confidence interval of all elems
+    pub fn p90_all(&self) -> TensorResult<T> { Ok(percentile_of(&self.host_data()?, 90.0)) }
+
     /// Percentile along a dim
     pub fn percentile(&self, p: f64, dim: isize, keepdim: bool) -> TensorResult<Self> { self.via_host(|t| t.reduce_with(dim, keepdim, |s| percentile_of(s, p))) }
     /// Percentile of all elems
@@ -162,7 +179,6 @@ impl<T: Element> Tensor<T> {
 
     /// Mean of all elems
     pub fn mean_all(&self) -> TensorResult<T> { Ok(T::from_f64(self.sum_all()?.to_f64() / self.numel() as f64)) }
-    // TODO:  p99,p95,p90
 
     /// Calculate range over dim 
     pub fn range(&self,dim:isize) -> TensorResult<Tensor<T>>{
@@ -177,8 +193,11 @@ impl<T: Element> Tensor<T> {
     }
     
     /// Calculate range over entire Tensor
-    // FIXME: Make efficient now we do two passes
-    pub fn range_all(&self) -> TensorResult<T>{ Ok(self.max_all()?.sub(self.min_all()?)) }
+    pub fn range_all(&self) -> TensorResult<T>{ 
+        let (mut mn,mut mx) = (T::highest(),T::lowest());
+        self.to_vec()?.iter().for_each(|x| {if x < &mn{ mn = *x;}if x > &mx{mx = *x;}});
+        Ok(mx-mn)
+    }
 
     /// Calculates IQR along a dim
     pub fn iqr(&self,dim: isize) -> TensorResult<Tensor<T>>{ self.quartile(dim, Quartile::Q3)?.sub(&self.quartile(dim, Quartile::Q1)?)}
