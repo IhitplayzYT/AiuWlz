@@ -11,7 +11,8 @@ members =[
     "src/crates/Tensors",
     "src/crates/Transforms",
     "src/crates/Utilities",
-    "src/crates/Macro",
+    "src/crates/Macro", 
+    "src/crates/VectorDB",
 ]
 
 [package]

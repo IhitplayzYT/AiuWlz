@@ -2,6 +2,7 @@ pub mod random;
 pub mod device;
 pub mod misc;
 pub mod logger;
+pub mod pipelines;
 
 #[allow(non_snake_case,non_camel_case_types,dead_code)]
 pub mod Utilities{

@@ -60,11 +60,14 @@ pub trait Float: Element {
     fn epsilon() -> Self;
     fn exp(self) -> Self;
     fn ln(self) -> Self;
+    fn log(self,base:Self) -> Self;
     fn sqrt(self) -> Self;
     fn sin(self) -> Self;
     fn cos(self) -> Self;
     fn tanh(self) -> Self;
     fn powf(self, e: Self) -> Self;
+    fn square(self) -> Self;
+    fn cube(self) -> Self;
     fn floor(self) -> Self;
     fn ceil(self) -> Self;
     fn is_nan(self) -> bool;
@@ -93,6 +96,9 @@ macro_rules! impl_float {
             fn cos(self) -> Self { <$t>::cos(self) }
             fn tanh(self) -> Self { <$t>::tanh(self) }
             fn powf(self, e: Self) -> Self { <$t>::powf(self, e) }
+            fn log(self, base:Self) -> Self { <$t>::log(self,base) }
+            fn square(self) -> Self { <$t>::powf(self, 2.0) }
+            fn cube(self) -> Self { <$t>::powf(self, 3.0) }
             fn floor(self) -> Self { <$t>::floor(self) }
             fn ceil(self) -> Self { <$t>::ceil(self) }
             fn is_nan(self) -> bool { <$t>::is_nan(self) }
