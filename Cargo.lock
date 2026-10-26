@@ -56,6 +56,10 @@ version = "0.1.0"
 [[package]]
 name = "NeuralNets"
 version = "0.1.0"
+dependencies = [
+ "Tensors",
+ "Utilities",
+]
 
 [[package]]
 name = "Optimisers"

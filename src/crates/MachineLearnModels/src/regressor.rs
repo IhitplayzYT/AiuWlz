@@ -142,7 +142,7 @@ impl<T: Float> LinearRegressor<T, Trained> {
         // b -> (n,1)
         if x.ndim() != 2 || x.shape()[1] != w.shape()[0] { return Err(ModelError::TensorError(TensorError::InvalidShape(format!("Expected shape with last dim {}, got {:?}", w.shape()[0], x.shape())))); }
 
-        x.matmul(w).map_err(ModelError::TensorError)?.map_err(ModelError::TensorError)
+        x.matmul(w).map_err(ModelError::TensorError)
     }
 
     pub fn weights(&self) -> &Tensor<T> { self.w.as_ref().expect("trained model must have weights") }
@@ -243,7 +243,7 @@ impl<T: Float> RidgeRegressor<T, Trained> {
         // w -> (p,1)
         // b -> (n,1)
         if x.ndim() != 2 || x.shape()[1] != w.shape()[0] { return Err(ModelError::TensorError(TensorError::InvalidShape(format!("Expected shape with last dim {}, got {:?}", w.shape()[0], x.shape())))); }
-        x.matmul(w).map_err(ModelError::TensorError)?.map_err(ModelError::TensorError)
+        x.matmul(w).map_err(ModelError::TensorError)
     }
 
     pub fn weights(&self) -> &Tensor<T> { self.w.as_ref().expect("trained model must have weights") }
@@ -345,7 +345,7 @@ impl<T: Float> LassoRegressor<T, Trained> {
         // w -> (p,1)
         // b -> (n,1)
         if x.ndim() != 2 || x.shape()[1] != w.shape()[0] { return Err(ModelError::TensorError(TensorError::InvalidShape(format!("Expected shape with last dim {}, got {:?}", w.shape()[0], x.shape())))); }
-        x.matmul(w).map_err(ModelError::TensorError)?.map_err(ModelError::TensorError)
+        x.matmul(w).map_err(ModelError::TensorError)
     }
 
     pub fn weights(&self) -> &Tensor<T> { self.w.as_ref().expect("trained model must have weights") }
@@ -459,7 +459,7 @@ impl<T: Float> ElasticNetRegressor<T, Trained> {
         // w -> (p,1)
         // b -> (n,1)
         if x.ndim() != 2 || x.shape()[1] != w.shape()[0] { return Err(ModelError::TensorError(TensorError::InvalidShape(format!("Expected shape with last dim {}, got {:?}", w.shape()[0], x.shape())))); }
-        x.matmul(w).map_err(ModelError::TensorError)?.map_err(ModelError::TensorError)
+        x.matmul(w).map_err(ModelError::TensorError)
     }
 
     pub fn weights(&self) -> &Tensor<T> { self.w.as_ref().expect("trained model must have weights") }
@@ -546,7 +546,7 @@ impl<T: Float> Perceptron<T, Trained> {
         // w -> (p,1)
         // b -> (n,1)
         if x.ndim() != 2 || x.shape()[1] != w.shape()[0] { return Err(ModelError::TensorError(TensorError::InvalidShape(format!("Expected shape with last dim {}, got {:?}", w.shape()[0], x.shape())))); }
-        x.matmul(w).map_err(ModelError::TensorError)?.map_err(ModelError::TensorError)
+        x.matmul(w).map_err(ModelError::TensorError)
     }
 
     pub fn weights(&self) -> &Tensor<T> { self.w.as_ref().expect("trained model must have weights") }

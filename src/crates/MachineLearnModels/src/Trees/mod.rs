@@ -4,4 +4,4 @@ mod regressor;
 
 pub use classifier::{ClassNode,DecisionTreeClassifier,DecisionTreeClassifierModel};
 pub use regressor::{RegrNode,DecisionTreeRegressor,DecisionTreeRegressorModel};
-pub use common::TreeConfig;
+pub use common::{ClassifierTreeConfig,RegressorTreeConfig};

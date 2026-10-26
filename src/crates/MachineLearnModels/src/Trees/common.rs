@@ -1,4 +1,4 @@
-use std::{cmp::Reverse, collections::{BTreeMap, HashMap}};
+use std::{cmp::Reverse, collections::{BTreeMap, HashMap}, fmt::Debug};
 
 use Tensors::{dtype::Float, tensor::Tensor};
 
@@ -6,27 +6,52 @@ use crate::{Trees::{classifier::ClassNode, regressor::RegrNode}, errors::ModelEr
 
 
 #[derive(Clone, Debug)]
-pub enum DecisionFn{
+
+pub enum ClassifierDecisionFn{
     Gini,
     Entropy,
-    Custom(fn(&[i64],&[usize]) -> f64)
+    Custom(fn(&[i64],&[usize]) -> f64),
+}
+
+#[derive(Clone, Debug)]
+pub enum RegressorDecisionFn<T:Float>{
+    VarianceSum,
+    Custom(fn(&[T],&[usize]) -> f64),
+}
+
+#[derive(Clone, Debug)]
+pub struct RegressorTreeConfig <T:Float>{
+    pub max_depth: usize,
+    pub min_samples_split: usize,
+    pub decision_fn:RegressorDecisionFn<T> 
+}
+
+impl <T:Float> Default for  RegressorTreeConfig<T> {
+    fn default() -> Self { Self{max_depth:8,min_samples_split:2,decision_fn:RegressorDecisionFn::VarianceSum} }
+}
+
+impl <T:Float> RegressorTreeConfig<T>{
+    fn new(max_depth:Option<usize>,min_samples:Option<usize>,decision_fn:Option<RegressorDecisionFn<T>>) -> Self{
+        Self { max_depth: max_depth.unwrap_or(8), min_samples_split: min_samples.unwrap_or(2), decision_fn: decision_fn.unwrap_or(RegressorDecisionFn::VarianceSum) }
+    }
 }
 
 
 #[derive(Clone, Debug)]
-pub struct TreeConfig {
+pub struct ClassifierTreeConfig {
     pub max_depth: usize,
     pub min_samples_split: usize,
-    pub decision_fn: DecisionFn
+    pub decision_fn: ClassifierDecisionFn
 }
 
-impl Default for TreeConfig {
-    fn default() -> Self { Self {max_depth: 8,min_samples_split: 2,decision_fn:DecisionFn::Gini} }
+impl Default for ClassifierTreeConfig {
+    fn default() -> Self { Self {max_depth: 8,min_samples_split: 2,decision_fn:ClassifierDecisionFn::Gini} }
 }
 
-pub fn validate_config(config: &TreeConfig) -> Result<(), ModelError> {
-    if config.min_samples_split < 2 {return Err(ModelError::ConfigError("min_samples_split must be at least 2".into()));}
-    Ok(())
+impl ClassifierTreeConfig{
+    fn new(max_depth:Option<usize>,min_samples:Option<usize>,decision_fn:Option<ClassifierDecisionFn>) -> Self{
+        Self { max_depth: max_depth.unwrap_or(8), min_samples_split: min_samples.unwrap_or(2), decision_fn: decision_fn.unwrap_or(ClassifierDecisionFn::Gini) }
+    }
 }
 
 pub fn validate_x<T: Float>(x: &Tensor<T>) -> Result<(), ModelError> {
@@ -92,10 +117,18 @@ pub fn entropy(labels:&[i64],indices:&[usize]) -> f64{
     })
 }
     
-pub fn decision_fn(labels:&[i64],indices:&[usize],cfg:&TreeConfig) -> f64{
+pub fn classifier_decision_fn(labels:&[i64],indices:&[usize],cfg:&ClassifierTreeConfig) -> f64{
     match cfg.decision_fn{
-        DecisionFn::Gini => gini(labels,indices),
-        DecisionFn::Entropy => entropy(labels,indices),
-        DecisionFn::Custom(f) => f(labels,indices)
+        ClassifierDecisionFn::Gini => gini(labels,indices),
+        ClassifierDecisionFn::Entropy => entropy(labels,indices),
+        ClassifierDecisionFn::Custom(f) => f(labels,indices)
+    }
+}
+
+
+pub fn regressor_decision_fn<T:Float>(targets:&[T],indices:&[usize],cfg:&RegressorTreeConfig<T>) -> f64{
+    match cfg.decision_fn{
+        RegressorDecisionFn::Custom(f) => f(targets,indices),
+        RegressorDecisionFn::VarianceSum => variance_sum(targets,indices)
     }
 }
