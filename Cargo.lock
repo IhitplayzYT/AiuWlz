@@ -7,10 +7,6 @@ name = "AiuWlz"
 version = "0.1.0"
 
 [[package]]
-name = "Algorithms"
-version = "0.1.0"
-
-[[package]]
 name = "Dataloader"
 version = "0.1.0"
 dependencies = [
@@ -94,6 +90,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "VectorDB"
+version = "0.1.0"
 
 [[package]]
 name = "adler2"

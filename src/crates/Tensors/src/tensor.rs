@@ -27,6 +27,12 @@ impl<T: Element> Tensor<T> {
         Ok(Self::from_comp(Storage::Cpu(data), Layout::contiguous(&[l])))
     }
 
+
+    pub fn downcast_f64(&self) -> Vec<f64>{
+        self.host_data().map(|x| *x).collect()
+
+    }
+
     /// Build a Tensor from 2d Vec
     pub fn from_2d(data: Vec<Vec<T>>) -> Result<Self>{
         let m = data.len();

@@ -1,6 +1,5 @@
 [workspace]
 members =[ 
-    "src/crates/Algorithms",
     "src/crates/Dataloader",
     "src/crates/MachineLearnModels",
     "src/crates/Metrics",
