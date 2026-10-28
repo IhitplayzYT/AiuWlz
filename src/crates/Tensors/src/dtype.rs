@@ -21,6 +21,8 @@ pub trait _Element: Copy + Send + Sync + 'static + PartialOrd + Debug + Display 
     fn highest() -> Self;
     fn from_f64(v: f64) -> Self;
     fn to_f64(self) -> f64;
+    fn from_f32(v: f32) -> Self;
+    fn to_f32(self) -> f32;
     fn max(self,other: Self) -> Self{
         if self.ge(&other){
             self
@@ -84,6 +86,8 @@ macro_rules! impl_float {
             fn highest() -> Self { <$t>::INFINITY }
             fn from_f64(v: f64) -> Self { v as $t }
             fn to_f64(self) -> f64 { self as f64 }
+            fn from_f32(v: f32) -> Self{v as $t}
+            fn to_f32(self) -> f32{self as f32}
         }
 
         impl Element for $t {}
@@ -118,6 +122,8 @@ macro_rules! impl_int {
             fn highest() -> Self { <$t>::MAX }
             fn from_f64(v: f64) -> Self { v as $t }
             fn to_f64(self) -> f64 { self as f64 }
+            fn from_f32(v: f32) -> Self{v as $t}
+            fn to_f32(self) -> f32{self as f32}
         }
 
         impl Element for $t {}
@@ -136,6 +142,8 @@ macro_rules! impl_uint {
             fn highest() -> Self { <$t>::MAX }
             fn from_f64(v: f64) -> Self { v as $t }
             fn to_f64(self) -> f64 { self as f64 }
+            fn from_f32(v: f32) -> Self{v as $t}
+            fn to_f32(self) -> f32{self as f32}
         }
     };
 }

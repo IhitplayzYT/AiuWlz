@@ -28,11 +28,6 @@ impl<T: Element> Tensor<T> {
     }
 
 
-    pub fn downcast_f64(&self) -> Vec<f64>{
-        self.host_data().map(|x| *x).collect()
-
-    }
-
     /// Build a Tensor from 2d Vec
     pub fn from_2d(data: Vec<Vec<T>>) -> Result<Self>{
         let m = data.len();
@@ -74,6 +69,14 @@ impl<T: Element> Tensor<T> {
     /// Create a scalar Tensor on Cpu
     pub fn scalar(v: T) -> Self {
         Self::from_comp(Storage::Cpu(vec![v]), Layout::contiguous(&[]))
+    }
+
+    pub fn downcast_f64(&self) -> Result<Vec<f64>>{
+        Ok(self.to_vec()?.into_iter().map(T::to_f64).collect())
+    }
+
+    pub fn downcast_f32(&self) -> Result<Vec<f32>>{
+        Ok(self.to_vec()?.into_iter().map(|x| x.to_f64() as f32).collect())
     }
 
     /// Create a new array filled with same elem on Cpu 
@@ -473,5 +476,12 @@ impl<T: Element> Tensor<T> {
         Ok(self.select(dim, 0)?.to_vec()?.len())
     }
 
+}
 
+pub fn deref_as_f64<T:Float>(v:&Vec<T>) -> Vec<f64>{
+    v.iter().map(|x| x.to_f64()).collect()
+}
+
+pub fn deref_as_f32<T:Float>(v:&Vec<T>) -> Vec<f32>{
+    v.iter().map(|x| x.to_f32()).collect()
 }
