@@ -1,3 +1,5 @@
+use Tensors::dtype::Float;
+
 pub struct Configured;
 pub struct Trained;
 
@@ -16,3 +18,6 @@ pub enum Regularisation{
     Lasso(f64),
     ElastiNet(f64,f64)
 }
+
+
+pub fn euclid_dist<T:Float>(v1: &[T], v2: &[T]) -> T { v1.iter().zip(v2.iter()).fold(T::zero(), |acc, (a, b)| acc + (*a - *b) * (*a - *b)).sqrt() }
