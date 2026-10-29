@@ -1,4 +1,5 @@
 use Tensors::{dtype::Float, tensor::Tensor};
+use rand::seq::SliceRandom;
 
 use crate::{Trees::{RegressorTreeConfig, common::{mean, predict_regr, regressor_decision_fn, validate_predict_x, validate_x, variance_sum}}, errors::ModelError};
 
@@ -49,7 +50,8 @@ impl<T: Float> DecisionTreeRegressor<T> {
         let targets = y.to_vec()?;
         let rows = (0..n).map(|i| values[i * p..(i + 1) * p].to_vec()).collect::<Vec<_>>();
         let indices = (0..n).collect::<Vec<_>>();
-        let root = build_regr_tree(&rows, &targets, &indices, 0, &self.config);
+        let mut leaf_count = 0;
+        let root = build_regr_tree(&rows, &targets, &indices, 0, &self.config, &mut leaf_count);
         Ok(DecisionTreeRegressorModel {root,n_features: p})
     }
 }
@@ -64,21 +66,51 @@ impl<T: Float> DecisionTreeRegressorModel<T> {
 }
 
 
-fn build_regr_tree<T: Float>(rows: &[Vec<T>],targets: &[T],indices: &[usize],depth: usize,cfg: &RegressorTreeConfig<T>) -> RegrNode<T> {
+fn build_regr_tree<T: Float>(rows: &[Vec<T>],targets: &[T],indices: &[usize],depth: usize,cfg: &RegressorTreeConfig<T>,leaf_count: &mut usize) -> RegrNode<T> {
     let leaf = RegrNode::Leaf(mean(targets, indices));
-    if depth >= cfg.max_depth || indices.len() < cfg.min_samples_split { return leaf; }
+    
+    if depth >= cfg.max_depth || indices.len() < cfg.min_samples_split {
+        *leaf_count += 1;
+        return leaf;
+    }
+    
+    if let Some(max_leaves) = cfg.max_leaf_nodes {
+        if *leaf_count >= max_leaves { return leaf; }
+    }
+    
     let parent = variance_sum(targets, indices);
     let (mut best_gain, mut best_feature, mut best_thresh) = (0.0, 0usize, T::zero());
     let mut best_parts = None;
-    for feature in 0..rows[0].len() {
+    
+    // Determine number of features to consider
+    let n_features = rows[0].len();
+    let features_to_consider: Vec<usize> = match cfg.max_features {
+        Some(max_feat) => {
+            let mut feat_indices: Vec<usize> = (0..n_features).collect();
+            feat_indices.shuffle(&mut rand::thread_rng());
+            feat_indices.truncate(max_feat);
+            feat_indices
+        },
+        None => (0..n_features).collect(),
+    };
+    
+    for feature in features_to_consider {
         let mut candidates = indices.iter().map(|&i| rows[i][feature]).collect::<Vec<_>>();
         candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         candidates.dedup_by(|a, b| *a == *b);
+        
         for pair in candidates.windows(2) {
             let thresh = (pair[0] + pair[1]) / T::from_f64(2.0);
             let (left, right): (Vec<_>, Vec<_>) = indices.iter().copied().partition(|&i| rows[i][feature] <= thresh);
+            
+            if left.len() < cfg.min_samples_leaf || right.len() < cfg.min_samples_leaf { continue; }
+            
             if left.is_empty() || right.is_empty() { continue; }
+            
             let gain = parent - regressor_decision_fn(targets, &left,cfg) - regressor_decision_fn(targets, &right,cfg);
+            
+            if gain < cfg.min_impurity_decrease { continue; }
+            
             if gain > best_gain {
                 best_gain = gain;
                 best_feature = feature;
@@ -87,9 +119,13 @@ fn build_regr_tree<T: Float>(rows: &[Vec<T>],targets: &[T],indices: &[usize],dep
             }
         }
     }
+    
     match best_parts {
-        Some((left, right)) if best_gain > 0.0 => RegrNode::Split {feature: best_feature,threshold: best_thresh,left: Box::new(build_regr_tree(rows, targets, &left, depth + 1, cfg)),right: Box::new(build_regr_tree(rows, targets, &right, depth + 1, cfg))},
-        _ => leaf,
+        Some((left, right)) if best_gain > 0.0 => {RegrNode::Split {feature: best_feature,threshold: best_thresh,left: Box::new(build_regr_tree(rows, targets, &left, depth + 1, cfg, leaf_count)),right: Box::new(build_regr_tree(rows, targets, &right, depth + 1, cfg, leaf_count))}},
+        _ => {
+            *leaf_count += 1;
+            leaf
+        },
     }
 }
 

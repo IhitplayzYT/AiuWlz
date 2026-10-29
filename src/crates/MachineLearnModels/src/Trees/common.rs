@@ -20,19 +20,32 @@ pub enum RegressorDecisionFn<T:Float>{
 }
 
 #[derive(Clone, Debug)]
+pub enum Splitter {
+    Best,
+    Random,
+}
+
+#[derive(Clone, Debug)]
 pub struct RegressorTreeConfig <T:Float>{
     pub max_depth: usize,
     pub min_samples_split: usize,
+    pub min_samples_leaf: usize,
+    pub max_features: Option<usize>,
+    pub max_leaf_nodes: Option<usize>,
+    pub min_impurity_decrease: f64,
+    pub splitter: Splitter,
     pub decision_fn:RegressorDecisionFn<T> 
 }
 
 impl <T:Float> Default for  RegressorTreeConfig<T> {
-    fn default() -> Self { Self{max_depth:8,min_samples_split:2,decision_fn:RegressorDecisionFn::VarianceSum} }
+    fn default() -> Self { 
+        Self{max_depth:8,min_samples_split:2,min_samples_leaf:1,max_features:None,max_leaf_nodes:None,min_impurity_decrease:0.0,splitter:Splitter::Best,decision_fn:RegressorDecisionFn::VarianceSum} 
+    }
 }
 
 impl <T:Float> RegressorTreeConfig<T>{
-    fn new(max_depth:Option<usize>,min_samples:Option<usize>,decision_fn:Option<RegressorDecisionFn<T>>) -> Self{
-        Self { max_depth: max_depth.unwrap_or(8), min_samples_split: min_samples.unwrap_or(2), decision_fn: decision_fn.unwrap_or(RegressorDecisionFn::VarianceSum) }
+    pub fn new(max_depth: Option<usize>,min_samples_split: Option<usize>,min_samples_leaf: Option<usize>,max_features: Option<usize>,max_leaf_nodes: Option<usize>,min_impurity_decrease: Option<f64>,splitter: Option<Splitter>,decision_fn: Option<RegressorDecisionFn<T>>) -> Self{
+        Self { max_depth: max_depth.unwrap_or(8), min_samples_split: min_samples_split.unwrap_or(2),min_samples_leaf: min_samples_leaf.unwrap_or(1),max_features,max_leaf_nodes,min_impurity_decrease: min_impurity_decrease.unwrap_or(0.0),splitter: splitter.unwrap_or(Splitter::Best),decision_fn: decision_fn.unwrap_or(RegressorDecisionFn::VarianceSum) }
     }
 }
 
@@ -41,16 +54,23 @@ impl <T:Float> RegressorTreeConfig<T>{
 pub struct ClassifierTreeConfig {
     pub max_depth: usize,
     pub min_samples_split: usize,
+    pub min_samples_leaf: usize,
+    pub max_features: Option<usize>,
+    pub max_leaf_nodes: Option<usize>,
+    pub min_impurity_decrease: f64,
+    pub splitter: Splitter,
     pub decision_fn: ClassifierDecisionFn
 }
 
 impl Default for ClassifierTreeConfig {
-    fn default() -> Self { Self {max_depth: 8,min_samples_split: 2,decision_fn:ClassifierDecisionFn::Gini} }
+    fn default() -> Self { 
+        Self {max_depth: 8,min_samples_split: 2,min_samples_leaf: 1,max_features: None,max_leaf_nodes: None,min_impurity_decrease: 0.0,splitter: Splitter::Best,decision_fn: ClassifierDecisionFn::Gini } 
+    }
 }
 
 impl ClassifierTreeConfig{
-    fn new(max_depth:Option<usize>,min_samples:Option<usize>,decision_fn:Option<ClassifierDecisionFn>) -> Self{
-        Self { max_depth: max_depth.unwrap_or(8), min_samples_split: min_samples.unwrap_or(2), decision_fn: decision_fn.unwrap_or(ClassifierDecisionFn::Gini) }
+    pub fn new(max_depth: Option<usize>,min_samples_split: Option<usize>,min_samples_leaf: Option<usize>,max_features: Option<usize>,max_leaf_nodes: Option<usize>,min_impurity_decrease: Option<f64>,splitter: Option<Splitter>,decision_fn: Option<ClassifierDecisionFn>) -> Self{
+        Self { max_depth: max_depth.unwrap_or(8), min_samples_split: min_samples_split.unwrap_or(2),min_samples_leaf: min_samples_leaf.unwrap_or(1),max_features,max_leaf_nodes,min_impurity_decrease: min_impurity_decrease.unwrap_or(0.0),splitter: splitter.unwrap_or(Splitter::Best),decision_fn: decision_fn.unwrap_or(ClassifierDecisionFn::Gini) }
     }
 }
 
