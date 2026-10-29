@@ -164,3 +164,9 @@ impl_int!(i16, "i16");
 impl_int!(i32, "i32");
 impl_int!(i64, "i64");
 impl_int!(isize, "isize");
+
+pub enum Dtype<T>{
+    dim1(T),
+    dim2(T,T),
+    dim3(T,T,T)
+}

@@ -613,6 +613,14 @@ impl<T: Element> Tensor<T> {
         Ok(self.select(dim, 0)?.to_vec()?.len())
     }
 
+    pub fn deref_as_f64(&self) -> Result<Vec<f64>>{
+        Ok(self.to_vec()?.iter().map(|x| x.to_f64()).collect())
+    }
+
+    pub fn deref_as_f32(&self) -> Result<Vec<f32>>{
+        Ok(self.to_vec()?.iter().map(|x| x.to_f32()).collect())
+    }
+
 }
 
 pub fn deref_as_f64<T:Float>(v:&Vec<T>) -> Vec<f64>{
