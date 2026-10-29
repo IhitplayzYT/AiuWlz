@@ -262,5 +262,144 @@ impl<T: Float> DBSCAN<T> {
 
 }
 
+// ========================================== Hierarchical Clustering ========================================================
+
+
+#[derive(Debug)]
+pub struct HierarchicalClustering<T: Float> {
+    n_clusters: usize,
+    linkage: Linkage,
+    labels: Option<Vec<usize>>,
+    _phantom: PhantomData<T>
+}
+
+#[derive(Debug,Clone)]
+pub enum Linkage {
+    Single,
+    Complete,
+    Average,
+    Ward,
+}
+
+#[derive(Debug)]
+pub struct HierarchicalConfig<T: Float> {
+    pub n_clusters: usize,
+    pub linkage: Linkage,
+    _phantom: PhantomData<T>
+}
+
+impl<T: Float> Default for HierarchicalConfig<T> {
+    fn default() -> Self { Self {n_clusters: 2,linkage: Linkage::Average,_phantom:PhantomData} }
+}
+
+impl<T: Float> HierarchicalClustering<T> {
+    pub fn new(config: HierarchicalConfig<T>) -> Self { Self {n_clusters: config.n_clusters,linkage: config.linkage,labels: None,_phantom:PhantomData} }
+
+    pub fn fit(&mut self, x: &Tensor<T>) -> Result<(), ModelError> {
+        if x.ndim() != 2 { return Err(ModelError::InvalidData("X must be 2-dimensional".into())); }
+        let n = x.shape()[0];
+        let p = x.shape()[1];
+        let data = x.to_vec()?;
+        let rows: Vec<Vec<T>> = (0..n).map(|i| data[i * p..(i + 1) * p].to_vec()).collect();
+        let mut labels = vec![0usize; n];
+        let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+
+        while clusters.len() > self.n_clusters {
+            let (best_i, best_j) = self.find_closest_clusters(&rows, &clusters)?;
+            let merged = clusters[best_i].iter().chain(clusters[best_j].iter()).copied().collect();
+            clusters.remove(best_j.max(best_i));
+            clusters.remove(best_i.min(best_j));
+            clusters.push(merged);
+        }
+
+        for (cluster_id, cluster) in clusters.iter().enumerate() {
+            for &idx in cluster {labels[idx] = cluster_id;}
+        }
+
+        self.labels = Some(labels);
+        Ok(())
+    }
+
+    pub fn fit_predict(&mut self, x: &Tensor<T>) -> Result<Vec<usize>,ModelError> {
+        self.fit(x)?;
+        Ok(self.labels.clone().unwrap())
+    }
+
+    pub fn labels(&self) -> Option<&Vec<usize>> { self.labels.as_ref() }
+
+    fn find_closest_clusters(&self, rows: &[Vec<T>], clusters: &[Vec<usize>]) -> Result<(usize, usize), ModelError> {
+        let mut best_dist = T::from_f64(f64::MAX);
+        let mut best_pair = (0, 0);
+        for i in 0..clusters.len() {
+            for j in (i + 1)..clusters.len() {
+                let dist = self.cluster_dist(rows, &clusters[i], &clusters[j]);
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_pair = (i, j);
+                }
+            }
+        }
+        Ok(best_pair)
+    }
+
+    fn cluster_dist(&self, rows: &[Vec<T>], cluster1: &[usize], cluster2: &[usize]) -> T {
+        match self.linkage {
+            Linkage::Single => {
+                let mut min_dist = T::from_f64(f64::MAX);
+                for &i in cluster1 {
+                    for &j in cluster2 {
+                        let d = euclid_dist(&rows[i], &rows[j]);
+                        if d < min_dist { min_dist = d; }
+                    }
+                }
+                min_dist
+            }
+            Linkage::Complete => {
+                let mut max_dist = T::zero();
+                for &i in cluster1 {
+                    for &j in cluster2 {
+                        let d = euclid_dist(&rows[i], &rows[j]);
+                        if d > max_dist  {max_dist = d; }
+                    }
+                }
+                max_dist
+            }
+            Linkage::Average => {
+                let mut sum = T::zero();
+                let mut count = 0usize;
+                for &i in cluster1 {
+                    for &j in cluster2 {
+                        sum += euclid_dist(&rows[i], &rows[j]);
+                        count += 1;
+                    }
+                }
+                sum / T::from_f64(count as f64)
+            }
+            Linkage::Ward => {
+            // dist(c1,c2)^2 * (l1*l2)/(l1+l2)
+                let c1 = self.centroid(rows, cluster1);
+                let c2 = self.centroid(rows, cluster2);
+                let n1 = cluster1.len() as f64;
+                let n2 = cluster2.len() as f64;
+                let dist = euclid_dist(&c1, &c2);
+                dist * dist * T::from_f64((n1 * n2) / (n1 + n2))
+            }
+        }
+    }
+
+    fn centroid(&self, rows: &[Vec<T>], cluster: &[usize]) -> Vec<T> {
+        let p = rows[0].len();
+        let mut centroid = vec![T::zero(); p];        
+        for &idx in cluster {
+            for (i, &val) in rows[idx].iter().enumerate() { centroid[i] += val;}
+        }        
+        for k in 0..p { centroid[k] /= T::from_f64(cluster.len() as f64); }
+        centroid
+    }
+
+}
+
+
+
 
 }
