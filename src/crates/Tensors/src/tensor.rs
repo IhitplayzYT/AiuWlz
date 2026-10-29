@@ -6,6 +6,7 @@ use crate::par;
 use Utilities::random::Random::Rng;
 use crate::storage::Storage;
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -153,6 +154,76 @@ impl<T: Element> Tensor<T> {
 }
 
 impl<T: Float> Tensor<T> {
+
+    /// Sort a tensor
+    pub fn sort(&self) -> Result<Self> {
+        let compare = |a: &T, b: &T| match (a.to_f64().is_nan(), b.to_f64().is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+        };
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let mut values = self.to_vec()?;
+                par::sort_by(&mut values, compare);
+                Self::from_vec(values, &[self.numel()])
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => crate::cuda::sort(self),
+        }
+    }
+
+    /// Sort a tensor
+    pub fn reverse(&self) -> Result<Self> {
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let mut values = self.to_vec()?;
+                par::reverse(&mut values);
+                Self::from_vec(values, &[self.numel()])
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => {
+                let mut values = self.to_vec()?;
+                par::reverse(&mut values);
+                Self::from_vec(values, &[self.numel()])?.to_device(Device::Cuda(0))
+            }
+        }
+    }
+
+
+    /// Sort a tensor in descending
+    pub fn sort_desc(&self) -> Result<Self> {
+        let compare = |a: &T, b: &T| match (a.to_f64().is_nan(), b.to_f64().is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal),
+        };
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let mut values = self.to_vec()?;
+                par::sort_by(&mut values, compare);
+                Self::from_vec(values, &[self.numel()])
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => crate::cuda::sort_desc(self),
+        }
+    }
+
+    /// Sort using comparison fn
+    pub fn sort_by(&self,compare: &fn(&T,&T) -> Ordering) -> Result<Self> {
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let mut values = self.to_vec()?;
+                par::sort_by(&mut values, compare);
+                Self::from_vec(values, &[self.numel()])
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => crate::cuda::sort_by(self, *compare),
+        }
+    }
+
 
     /// Create a n elem tensor on a range
     pub fn linspace(start: T, end: T, steps: usize) -> Self {
@@ -458,10 +529,76 @@ impl<T: Element> Tensor<T> {
     } 
 
     /// Slice of indexes along dims
+    /// i.e dim=0,indices:[1,4,5] it selects the 1st ,4th and 5th row
     pub fn index_select(&self, dim: isize, indices: &[usize]) -> Result<Self> {
-        let parts: Vec<Tensor<T>> = indices.iter().map(|&i| self.narrow(dim, i, 1)).collect::<Result<_>>()?;
-        let refs: Vec<&Tensor<T>> = parts.iter().collect();
-        Self::cat(&refs, dim)
+        let d = normalize_dim(dim, self.ndim())?;
+        if let Some(&bad) = indices.iter().find(|&&i| i >= self.shape()[d]) { return Err(TensorError::InvalidShape(format!("Index {bad} out of bounds for dimension {d} with length {}",self.shape()[d]))); }
+        let mut out_shape = self.shape().to_vec();
+        out_shape[d] = indices.len();
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let src = self.compact()?;
+                let src_data = src.storage.as_cpu().expect("CPU compact stays on CPU");
+                let inner: usize = self.shape()[d + 1..].iter().product();
+                let outer: usize = self.shape()[..d].iter().product();
+                let width = indices.len() * inner;
+                let out_len = outer * width;
+                let out = par::map_range(out_len, |i| {
+                    let outer_i = i / width;
+                    let in_block_i = i % width;
+                    let selected_i = in_block_i / inner;
+                    let inner_i = in_block_i % inner;
+                    let src_i = outer_i * self.shape()[d] * inner + indices[selected_i] * inner + inner_i;
+                    src_data[src_i]
+                });
+                Self::from_vec(out, &out_shape)
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => crate::cuda::index_select(self, d, indices, &out_shape),
+        }
+    }
+
+    /// Select elements from flattened tensor using zero-based indices into 1d tensor
+    /// Takes values at indices in ther flat repr of tensor
+    pub fn take(&self, indices: &[usize]) -> Result<Self> {
+        let flat = self.flatten()?;
+        flat.index_select(0, indices)
+    }
+
+    /// Select elements from the flattened logical tensor using zero-based indices
+    /// Same as Tensor::take
+    pub fn gather_flat(&self, indices: &[usize]) -> Result<Self> {
+        self.take(indices)
+    }
+
+    /// Gather values along `dim` using an integer index tensor. 
+    /// Simular to permute wheere indices have elems 0..n where n is the number of elemenst across that dim
+    pub fn gather(&self, dim: isize, indices: &Tensor<i64>) -> Result<Self> {
+        let d = normalize_dim(dim, self.ndim())?;
+        if indices.ndim() != self.ndim() || (0..self.ndim()).any(|axis| axis != d && indices.shape()[axis] != self.shape()[axis]){ return Err(TensorError::ShapeMismatch {op: "Gather",lhs: self.shape().to_vec(),rhs: indices.shape().to_vec()}); }
+        let raw_indices = indices.host_data()?;
+        if let Some(&bad) = raw_indices.iter().find(|&&i| i < 0 || i as u128 >= self.shape()[d] as u128) { return Err(TensorError::InvalidShape(format!("Gather index {bad} out of bounds for dimension {d} with length {}",self.shape()[d]))); }
+        let index_data: Vec<usize> = raw_indices.iter().map(|&i| i as usize).collect();
+        let out_shape = indices.shape().to_vec();
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let src = self.compact()?;
+                let src_data = src.storage.as_cpu().expect("CPU compact stays on CPU");
+                let inner: usize = self.shape()[d + 1..].iter().product();
+                let index_dim = indices.shape()[d];
+                let width = index_dim * inner;
+                let out = par::map_range(indices.numel(), |i| {
+                    let outer_i = i / width;
+                    let in_block_i = i % width;
+                    let inner_i = in_block_i % inner;
+                    let src_i = outer_i * self.shape()[d] * inner + index_data[i] * inner + inner_i;
+                    src_data[src_i]
+                });
+                Self::from_vec(out, &out_shape)
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => crate::cuda::gather(self, d, &index_data, &out_shape),
+        }
     }
 
     /// Split into size chunks along dim

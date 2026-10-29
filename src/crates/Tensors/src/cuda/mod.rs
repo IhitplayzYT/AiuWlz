@@ -12,6 +12,7 @@ use crate::storage::Storage;
 use crate::tensor::Tensor;
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use cudarc::nvrtc::compile_ptx;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -131,6 +132,124 @@ pub fn compact<T: Element>(t: &Tensor<T>) -> Result<Tensor<T>> {
         unsafe { b.launch(LaunchConfig::for_num_elems(n as u32)) }.map_err(cu)?;
     }
     Ok(wrap(out, c, t.shape()))
+}
+
+/// Parallel indexed slice gather. The input is compacted on device, then one
+/// thread copies each output element from its selected source slice.
+pub fn index_select<T: Element>(t: &Tensor<T>, dim: usize, indices: &[usize], out_shape: &[usize]) -> Result<Tensor<T>> {
+    let t = t.compact()?;
+    let c = cstore(&t)?;
+    let inner: usize = t.shape()[dim + 1..].iter().product();
+    let n = out_shape.iter().product::<usize>();
+    let mut out = alloc(c, n)?;
+    if n > 0 {
+        let indices_d = c.dev.stream.clone_htod(indices).map_err(cu)?;
+        let dim_size = t.shape()[dim];
+        let index_count = indices.len();
+        let f = func::<T>(&c.dev, "index_select_k")?;
+        let mut b = c.dev.stream.launch_builder(&f);
+        b.arg(&mut out).arg(&c.data).arg(&indices_d).arg(&n)
+            .arg(&dim_size).arg(&index_count).arg(&inner);
+        unsafe { b.launch(LaunchConfig::for_num_elems(n as u32)) }.map_err(cu)?;
+    }
+    Ok(wrap(out, c, out_shape))
+}
+
+/// Gather from a dense input using one index per output element.
+pub fn gather<T: Element>(t: &Tensor<T>, dim: usize, indices: &[usize], out_shape: &[usize]) -> Result<Tensor<T>> {
+    let t = t.compact()?;
+    let c = cstore(&t)?;
+    let inner: usize = t.shape()[dim + 1..].iter().product();
+    let index_dim = out_shape[dim];
+    let n = out_shape.iter().product::<usize>();
+    let mut out = alloc(c, n)?;
+    if n > 0 {
+        let indices_d = c.dev.stream.clone_htod(indices).map_err(cu)?;
+        let dim_size = t.shape()[dim];
+        let f = func::<T>(&c.dev, "gather_axis_k")?;
+        let mut b = c.dev.stream.launch_builder(&f);
+        b.arg(&mut out).arg(&c.data).arg(&indices_d).arg(&n)
+            .arg(&dim_size).arg(&index_dim).arg(&inner);
+        unsafe { b.launch(LaunchConfig::for_num_elems(n as u32)) }.map_err(cu)?;
+    }
+    Ok(wrap(out, c, out_shape))
+}
+
+fn launch_merge_sort_pass<T: Element>(c: &CudaStorage<T>, input: &CudaSlice<T>, output: &mut CudaSlice<T>, n: usize, run: usize) -> Result<()> {
+    let f = func::<T>(&c.dev, "merge_sort_pass_k")?;
+    let mut b = c.dev.stream.launch_builder(&f);
+    b.arg(output).arg(input).arg(&n).arg(&run);
+    unsafe { b.launch(LaunchConfig::for_num_elems(n as u32)) }.map(|_| ()).map_err(cu)
+}
+
+fn launch_desc_merge_sort_pass<T: Element>(c: &CudaStorage<T>, input: &CudaSlice<T>, output: &mut CudaSlice<T>, n: usize, run: usize) -> Result<()> {
+    let f = func::<T>(&c.dev, "merge_sort_desc_pass_k")?;
+    let mut b = c.dev.stream.launch_builder(&f);
+    b.arg(output).arg(input).arg(&n).arg(&run);
+    unsafe { b.launch(LaunchConfig::for_num_elems(n as u32)) }.map(|_| ()).map_err(cu)
+}
+
+fn launch_cmp_merge_sort_pass<T: Element>(c: &CudaStorage<T>, input: &CudaSlice<T>, output: &mut CudaSlice<T>, n: usize, run: usize, cmp_op: i32) -> Result<()> {
+    let f = func::<T>(&c.dev, "merge_sort_pass_compare_k")?;
+    let mut b = c.dev.stream.launch_builder(&f);
+    b.arg(output).arg(input).arg(&n).arg(&run).arg(&cmp_op);
+    unsafe { b.launch(LaunchConfig::for_num_elems(n as u32)) }.map(|_| ()).map_err(cu)
+}
+
+/// Parallel device merge sort for floating point tensor
+pub fn sort<T: Float>(t: &Tensor<T>) -> Result<Tensor<T>> {
+    let t = t.flatten()?.compact()?;
+    let c = cstore(&t)?;
+    let n = t.numel();
+    if n < 2 { return Ok(t); }
+    let mut a = alloc(c, n)?;
+    let mut b = alloc(c, n)?;
+    launch_merge_sort_pass(c, &c.data, &mut a, n, 1)?;
+    let mut last_in_a = true;
+    let mut run = 2usize;
+    while run < n {
+        if last_in_a {
+            launch_merge_sort_pass(c, &a, &mut b, n, run)?;
+        } else {
+            launch_merge_sort_pass(c, &b, &mut a, n, run)?;
+        }
+        last_in_a = !last_in_a;
+        run = run.saturating_mul(2);
+    }
+    let sorted = if last_in_a { a } else { b };
+    Ok(wrap(sorted, c, &[n]))
+}
+
+pub fn sort_by<T: Float>(t: &Tensor<T>, compare: fn(&T, &T) -> Ordering) -> Result<Tensor<T>> {
+    // For custom comparisons, fall back to CPU since CUDA can't handle arbitrary function pointers
+    t.via_host(|h| {
+        let mut data = h.to_vec()?;
+        data.sort_by(compare);
+        Tensor::from_vec(data, h.shape())
+    })
+}
+
+pub fn sort_desc<T: Float>(t: &Tensor<T>) -> Result<Tensor<T>> {
+    let t = t.flatten()?.compact()?;
+    let c = cstore(&t)?;
+    let n = t.numel();
+    if n < 2 { return Ok(t); }
+    let mut a = alloc(c, n)?;
+    let mut b = alloc(c, n)?;
+    launch_desc_merge_sort_pass(c, &c.data, &mut a, n, 1)?;
+    let mut last_in_a = true;
+    let mut run = 2usize;
+    while run < n {
+        if last_in_a {
+            launch_desc_merge_sort_pass(c, &a, &mut b, n, run)?;
+        } else {
+            launch_desc_merge_sort_pass(c, &b, &mut a, n, run)?;
+        }
+        last_in_a = !last_in_a;
+        run = run.saturating_mul(2);
+    }
+    let sorted = if last_in_a { a } else { b };
+    Ok(wrap(sorted, c, &[n]))
 }
 
 /// Apply UnaryOp on tensor on Gpu

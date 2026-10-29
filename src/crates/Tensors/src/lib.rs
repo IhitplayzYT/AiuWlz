@@ -8,5 +8,6 @@ pub mod par;
 pub mod ops_elementwise;
 pub mod ops_linalg;
 pub mod ops_stats;
+#[cfg(feature = "cuda")]
 pub mod cuda;
 pub mod autograd;

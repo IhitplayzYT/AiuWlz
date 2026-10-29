@@ -190,6 +190,161 @@ extern "C" __global__ void gather_k(T* out, const T* inp, const size_t* indices,
     out[i] = inp[indices[i]];
 }
 
+// Gather selected slices along one dimension from a dense logical input.
+extern "C" __global__ void index_select_k(T* out, const T* inp, const size_t* indices,size_t n, size_t dim_size, size_t index_count,size_t inner) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size_t width = index_count * inner;
+    size_t outer_i = i / width;
+    size_t in_block_i = i % width;
+    size_t selected_i = in_block_i / inner;
+    size_t inner_i = in_block_i % inner;
+    size_t src_i = outer_i * dim_size * inner + indices[selected_i] * inner + inner_i;
+    out[i] = inp[src_i];
+}
+
+// Gather with one potentially different index for each output slice position.
+extern "C" __global__ void gather_axis_k(T* out, const T* inp, const size_t* indices,size_t n, size_t dim_size, size_t index_dim,size_t inner) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size_t width = index_dim * inner;
+    size_t outer_i = i / width;
+    size_t in_block_i = i % width;
+    size_t inner_i = in_block_i % inner;
+    size_t src_i = outer_i * dim_size * inner + indices[i] * inner + inner_i;
+    out[i] = inp[src_i];
+}
+
+__device__ __forceinline__ bool sort_less(T a, T b) {
+    bool an = isnan(a), bn = isnan(b);
+    if (an) return false;
+    if (bn) return true;
+    return a < b;
+}
+
+__device__ __forceinline__ bool sort_greater(T a, T b) {
+    bool an = isnan(a), bn = isnan(b);
+    if (an) return true;
+    if (bn) return false;
+    return a > b;
+}
+
+
+// One parallel merge pass over sorted runs of `run` elements. NaNs sort last.
+extern "C" __global__ void merge_sort_pass_k(T* out, const T* inp, size_t n, size_t run) {
+    size_t pos = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (pos >= n) return;
+    size_t group = run * 2;
+    size_t base = (pos / group) * group;
+    size_t len_a = n - base < run ? n - base : run;
+    size_t remain = n - base - len_a;
+    size_t len_b = remain < run ? remain : run;
+    size_t k = pos - base;
+    size_t low = k > len_b ? k - len_b : 0;
+    size_t high = k < len_a ? k : len_a;
+    size_t take_a = 0;
+    while (low <= high) {
+        size_t i = low + (high - low) / 2;
+        size_t j = k - i;
+        if (i > 0 && j < len_b && sort_less(inp[base + len_a + j], inp[base + i - 1])) {
+            high = i - 1;
+        } else if (j > 0 && i < len_a && !sort_less(inp[base + len_a + j - 1], inp[base + i])) {
+            low = i + 1;
+        } else {
+            take_a = i;
+            break;
+        }
+    }
+    size_t take_b = k - take_a;
+    if (take_a < len_a && (take_b >= len_b || !sort_less(inp[base + len_a + take_b], inp[base + take_a])))
+        out[pos] = inp[base + take_a];
+    else
+        out[pos] = inp[base + len_a + take_b];
+}
+
+extern "C" __global__ void merge_sort_pass_compare_k(T* out, const T* inp, size_t n, size_t run, int cmp_op) {
+    size_t pos = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (pos >= n) return;
+    size_t group = run * 2;
+    size_t base = (pos / group) * group;
+    size_t len_a = n - base < run ? n - base : run;
+    size_t remain = n - base - len_a;
+    size_t len_b = remain < run ? remain : run;
+    size_t k = pos - base;
+    size_t low = k > len_b ? k - len_b : 0;
+    size_t high = k < len_a ? k : len_a;
+    size_t take_a = 0;
+    while (low <= high) {
+        size_t i = low + (high - low) / 2;
+        size_t j = k - i;
+        bool should_swap = false;
+        if (cmp_op == 0) {
+            // Ascending
+            should_swap = i > 0 && j < len_b && sort_less(inp[base + len_a + j], inp[base + i - 1]);
+        } else {
+            // Descending
+            should_swap = i > 0 && j < len_b && sort_greater(inp[base + len_a + j], inp[base + i - 1]);
+        }
+        if (should_swap) {
+            high = i - 1;
+        } else {
+            bool should_inc = false;
+            if (cmp_op == 0) {
+                should_inc = j > 0 && i < len_a && !sort_less(inp[base + len_a + j - 1], inp[base + i]);
+            } else {
+                should_inc = j > 0 && i < len_a && !sort_greater(inp[base + len_a + j - 1], inp[base + i]);
+            }
+            if (should_inc) {
+                low = i + 1;
+            } else {
+                take_a = i;
+                break;
+            }
+        }
+    }
+    size_t take_b = k - take_a;
+    bool should_take_a = false;
+    if (cmp_op == 0) {
+        should_take_a = take_a < len_a && (take_b >= len_b || !sort_less(inp[base + len_a + take_b], inp[base + take_a]));
+    } else {
+        should_take_a = take_a < len_a && (take_b >= len_b || !sort_greater(inp[base + len_a + take_b], inp[base + take_a]));
+    }
+    if (should_take_a)
+        out[pos] = inp[base + take_a];
+    else
+        out[pos] = inp[base + len_a + take_b];
+}
+
+extern "C" __global__ void merge_sort_desc_pass_k(T* out, const T* inp, size_t n, size_t run) {
+    size_t pos = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (pos >= n) return;
+    size_t group = run * 2;
+    size_t base = (pos / group) * group;
+    size_t len_a = n - base < run ? n - base : run;
+    size_t remain = n - base - len_a;
+    size_t len_b = remain < run ? remain : run;
+    size_t k = pos - base;
+    size_t low = k > len_b ? k - len_b : 0;
+    size_t high = k < len_a ? k : len_a;
+    size_t take_a = 0;
+    while (low <= high) {
+        size_t i = low + (high - low) / 2;
+        size_t j = k - i;
+        if (i > 0 && j < len_b && sort_greater(inp[base + len_a + j], inp[base + i - 1])) {
+            high = i - 1;
+        } else if (j > 0 && i < len_a && !sort_greater(inp[base + len_a + j - 1], inp[base + i])) {
+            low = i + 1;
+        } else {
+            take_a = i;
+            break;
+        }
+    }
+    size_t take_b = k - take_a;
+    if (take_a < len_a && (take_b >= len_b || !sort_greater(inp[base + len_a + take_b], inp[base + take_a])))
+        out[pos] = inp[base + take_a];
+    else
+        out[pos] = inp[base + len_a + take_b];
+}
 
 // Parallel Arange 
 extern "C" __global__ void arange_k(T* out, size_t n, T start, T step) {

@@ -12,6 +12,15 @@ pub fn map_slice<A: Sync, R: Send>(src: &[A], f: impl Fn(&A) -> R + Sync + Send)
     src.iter().map(f).collect()
 }
 
+/// Map integer positions without allocating a temporary index vector.
+pub fn map_range<R: Send>(len: usize, f: impl Fn(usize) -> R + Sync + Send) -> Vec<R> {
+    #[cfg(feature = "parallel")]
+    if len >= MX_PARALLEL {
+        return (0..len).into_par_iter().map(f).collect();
+    }
+    (0..len).map(f).collect()
+}
+
 pub fn zip_slices<A: Sync, B: Sync, R: Send>(a: &[A], b: &[B], f: impl Fn(&A, &B) -> R + Sync + Send) -> Vec<R> {
     #[cfg(feature = "parallel")]
     if a.len() >= MX_PARALLEL {
@@ -44,6 +53,24 @@ pub fn sort<T: Send + Ord>(data: &mut [T]) {
         return;
     }
     data.sort();
+}
+
+pub fn reverse<T: Send>(data: &mut [T]) {
+    #[cfg(feature = "parallel")]
+    if data.len() >= MX_PARALLEL {
+        data.reverse();
+        return;
+    }
+    data.reverse();
+}
+
+pub fn sort_by<T: Send>(data: &mut [T], compare: impl Fn(&T, &T) -> std::cmp::Ordering + Sync + Send) {
+    #[cfg(feature = "parallel")]
+    if data.len() >= MX_PARALLEL {
+        data.par_sort_by(compare);
+        return;
+    }
+    data.sort_by(compare);
 }
 
 
