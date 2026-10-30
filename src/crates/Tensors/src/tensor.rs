@@ -444,6 +444,35 @@ impl<T: Element> Tensor<T> {
     /// Pick a dim  return the tensor along that entire dim
     pub fn select(&self, dim: isize, index: usize) -> Result<Self> { Ok(self.view_as(self.layout.select(normalize_dim(dim, self.ndim())?, index)?))}
 
+    /// Similar to indexing operation
+    pub fn index(self,index: &[isize]) -> Result<Self>{
+        if self.ndim() < index.len() {return Err(TensorError::InvalidShape("Index provided is longer then tensor ndim".into()))}
+        let sel_clone= self.clone();
+        let shape = sel_clone.shape();
+        let mut cur = self;
+        for ((i,v),ndim) in index.iter().enumerate().zip(shape){
+            cur = cur.select(i as isize, normalize_dim(*v, *ndim)?)?;
+        }
+        Ok(cur.clone())
+    }
+
+
+    /// Slice consecutive dimensions using [start, end, ...]
+    pub fn slice(self,index: &[usize]) -> Result<Self>{
+        if index.len() & 1 != 0{return Err(TensorError::InvalidShape("The index array has to be an even length array".into()));}
+        if self.ndim() < index.len()/2 {return Err(TensorError::InvalidShape("The index array has more constraints than dimensions on tensor".into()));}
+
+        let mut out = self;
+        for (dim, range) in index.chunks_exact(2).enumerate() {
+            let (start, end) = (range[0], range[1]);
+            let dim_size = out.shape()[dim];
+            if start > end || end > dim_size { return Err(TensorError::InvalidShape(format!( "Slice range {start}..{end} out of bounds for dimension {dim} with length {dim_size}"))); } 
+            out = out.narrow(dim as isize, start, end - start)?;
+        }
+        Ok(out)
+    }
+
+
     /// Reverse elem orderign along a dim
     pub fn flip(&self, dim: isize) -> Result<Self> { Ok(self.view_as(self.layout.flip(normalize_dim(dim, self.ndim())?)?))}
 
@@ -557,6 +586,7 @@ impl<T: Element> Tensor<T> {
             Storage::Cuda(_) => crate::cuda::index_select(self, d, indices, &out_shape),
         }
     }
+
 
     /// Select elements from flattened tensor using zero-based indices into 1d tensor
     /// Takes values at indices in ther flat repr of tensor
