@@ -1,4 +1,5 @@
 use Utilities::device::Device::Device;
+use crate::cuda::sort;
 use crate::dtype::{Element, Float};
 use crate::error::{Result, TensorError};
 use crate::layout::{normalize_dim, normalize_dim_inclusive, Layout};
@@ -631,11 +632,146 @@ impl<T: Element> Tensor<T> {
         }
     }
 
-    /// Split into size chunks along dim
+    /// Split into 'size' chunks along dim
     pub fn split(&self, dim: isize, size: usize) -> Result<Vec<Self>> {
         let d = normalize_dim(dim, self.ndim())?;
         let n = self.shape()[d];
         (0..n).step_by(size.max(1)).map(|s| self.narrow(d as isize, s, size.min(n - s))).collect()
+    }
+
+    /// Split into n chunks along dim
+    pub fn chunk(&self, dim: isize, chunks: usize) -> Result<Vec<Self>> {
+        let d = normalize_dim(dim, self.ndim())?;
+        let n = self.shape()[d];
+        let chunk_sz = (n + chunks - 1) / chunks;
+        (0..chunks).map(|i| {
+            let st = i * chunk_sz;
+            self.narrow(d as isize, st,chunk_sz.min(n - st))
+        }).collect()
+    }
+
+    /// Select elements using bool mask
+    pub fn masked_select(&self, mask: &Tensor<T>) -> Result<Self> {
+        if self.shape() != mask.shape() { return Err(TensorError::ShapeMismatch { op: "masked_select", lhs: self.shape().to_vec(), rhs: mask.shape().to_vec() });}
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let data = self.host_data()?;
+                let mask_data = mask.host_data()?;
+                let selected: Vec<T> = data.iter().zip(mask_data.iter()).filter(|&(_, m)| *m != T::zero()).map(|(&v, _)| v).collect();
+                Self::from_vec(selected.clone(), &[selected.len()])
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => crate::cuda::masked_select(self, mask),
+        }
+    }
+
+    /// Scatter values at indices along dim
+    pub fn scatter(&self, dim: isize, index: &Tensor<i64>, src: &Tensor<T>) -> Result<Self> {
+        let d = normalize_dim(dim, self.ndim())?;
+        if index.shape() != src.shape() { return Err(TensorError::ShapeMismatch { op: "scatter", lhs: index.shape().to_vec(), rhs: src.shape().to_vec() }); }
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let mut out = self.to_vec()?;
+                let index_data = index.host_data()?;
+                let src_data = src.host_data()?;
+                let inner: usize = self.shape()[d + 1..].iter().product();
+                for i in 0..src.numel() {
+                    let outer_i = i / (src.shape()[d] * inner);
+                    let in_block_i = i % (src.shape()[d] * inner);
+                    let inner_i = in_block_i % inner;
+                    let idx = index_data[i] as usize;
+                    if idx < self.shape()[d] {
+                        let out_i = outer_i * self.shape()[d] * inner + idx * inner + inner_i;
+                        out[out_i] = src_data[i];
+                    }
+                }
+                Self::from_vec(out, self.shape())
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => crate::cuda::scatter(self, d, index, src),
+        }
+    }
+
+    /// Indices that would sort the tensor
+    pub fn argsort(&self) -> Result<Tensor<i64>> {
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let data = self.host_data()?;
+                let mut indexed: Vec<(T, usize)> = data.iter().enumerate().map(|(i, &v)| (v, i)).collect();
+                indexed.sort_by(|a, b| {
+                    match (a.0.to_f64().is_nan(), b.0.to_f64().is_nan()) {
+                        (true, true) => std::cmp::Ordering::Equal,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        (false, false) => a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal),
+                    }
+                });
+                Tensor::from_vec(indexed.iter().map(|(_, i)| *i as i64).collect(), self.shape())
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => {
+                let cpu_self = self.cpu()?;
+                let result = cpu_self.argsort()?;
+                result.to_device(self.device())
+            }
+        }
+    }
+
+    /// Return unique elements in tensor
+    pub fn unique(&self) -> Result<Self> {
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let data = self.host_data()?;
+                let mut sorted: Vec<T> = data.to_vec();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.dedup();
+                let l = sorted.len();
+                Self::from_vec(sorted, &[l])
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => {
+                let cpu_self = self.cpu()?;
+                let result = cpu_self.unique()?;
+                result.to_device(self.device())
+            }
+        }
+    }
+
+    /// Return top k elements and their indices
+    pub fn topk(&self, k: usize) -> Result<(Self, Tensor<i64>)> {
+        let argsorted = self.argsort()?;
+        let top_indices = argsorted.flatten()?.narrow(0, 0, k)?;
+        let top_values = self.take(&top_indices.host_data()?.iter().map(|&i| i as usize).collect::<Vec<_>>())?;
+        Ok((top_values, top_indices))
+    }
+
+    /// Repeat tensor along dims
+    pub fn repeat(&self, dim: isize, repeats: usize) -> Result<Self> {
+        let d = normalize_dim(dim, self.ndim())?;
+        let mut out_shape = self.shape().to_vec();
+        out_shape[d] *= repeats;
+        match &*self.storage {
+            Storage::Cpu(_) => {
+                let data = self.host_data()?;
+                let inner: usize = self.shape()[d + 1..].iter().product();
+                let dim_size = self.shape()[d];
+                let out_len = out_shape.iter().product();
+                let out = par::map_range(out_len, |i| {
+                    let outer_i = i / (repeats * dim_size * inner);
+                    let dim_i = (i / inner) % dim_size;
+                    let inner_i = i % inner;
+                    let src_i = outer_i * dim_size * inner + dim_i * inner + inner_i;
+                    data[src_i]
+                });
+                Self::from_vec(out, &out_shape)
+            }
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => {
+                let cpu_self = self.cpu()?;
+                let result = cpu_self.repeat(0, repeats)?;
+                result.to_device(self.device())
+            }
+        }
     }
 
     /// Len of tensor along a dim

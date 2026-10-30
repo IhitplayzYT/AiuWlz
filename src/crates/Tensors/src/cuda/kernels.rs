@@ -399,6 +399,31 @@ extern "C" __global__ void softmax_k(T* out, const T* inp, size_t rows, size_t c
     out[row * cols + col] = exp_val / ssum[0];
 }
 
+// Parallel masked select: select elements where mask is non-zero
+extern "C" __global__ void masked_select_k(T* out, const T* inp, const T* mask, size_t n, size_t* count) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (mask[i] != (T)0) {
+        size_t idx = atomicAdd(count, 1);
+        out[idx] = inp[i];
+    }
+}
+
+// Parallel scatter: write src values at indices
+extern "C" __global__ void scatter_k(T* out, const T* src, const size_t* indices, size_t n, size_t dim_size, size_t inner) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size_t outer_i = i / (dim_size * inner);
+    size_t in_block_i = i % (dim_size * inner);
+    size_t selected_i = in_block_i / inner;
+    size_t inner_i = in_block_i % inner;
+    size_t idx = indices[i];
+    if (idx < dim_size) {
+        size_t out_i = outer_i * dim_size * inner + idx * inner + inner_i;
+        out[out_i] = src[i];
+    }
+}
+
 // Parallel Z normalisation (x - mean) / std_dev
 extern "C" __global__ void layer_norm_k(T* out, const T* inp, size_t rows, size_t cols, T eps) {
     size_t row = blockIdx.y * (size_t)blockDim.y + threadIdx.y;

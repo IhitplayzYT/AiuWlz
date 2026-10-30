@@ -469,3 +469,63 @@ pub fn layer_norm<T: Float>(t: &Tensor<T>, eps: T) -> Result<Tensor<T>> {
     unsafe { b.launch(cfg) }.map_err(cu)?;
     Ok(wrap(out, c, t.shape()))
 }
+
+pub fn masked_select<T: Element>(t: &Tensor<T>, mask: &Tensor<T>) -> Result<Tensor<T>> {
+    let t = t.compact()?;
+    let mask = mask.compact()?;
+    let (ct, cm) = (cstore(&t)?, cstore(&mask)?);
+    let n = t.numel();
+    
+    // First pass: count true elements
+    let count_d = ct.dev.stream.alloc_zeros::<usize>(1).map_err(cu)?;
+    let f = func::<T>(&ct.dev, "masked_select_k")?;
+    let cfg = LaunchConfig::for_num_elems(n as u32);
+    let mut temp = alloc(ct, 1)?;
+    let mut b = ct.dev.stream.launch_builder(&f);
+    b.arg(&mut temp).arg(&ct.data).arg(&cm.data).arg(&n).arg(&count_d);
+    unsafe { b.launch(cfg) }.map_err(cu)?;
+    
+    let count_vec = ct.dev.stream.clone_dtoh(&count_d).map_err(cu)?;
+    let count = count_vec[0];
+    
+    if count == 0 {
+        return Ok(wrap(alloc(ct, 1)?, ct, &[1]));
+    }
+    
+    // Second pass: actually select
+    let mut out = alloc(ct, count)?;
+    let count_d = ct.dev.stream.alloc_zeros::<usize>(1).map_err(cu)?;
+    let mut b = ct.dev.stream.launch_builder(&f);
+    b.arg(&mut out).arg(&ct.data).arg(&cm.data).arg(&n).arg(&count_d);
+    unsafe { b.launch(cfg) }.map_err(cu)?;
+    
+    Ok(wrap(out, ct, &[count]))
+}
+
+pub fn scatter<T: Element>(t: &Tensor<T>, dim: usize, index: &Tensor<i64>, src: &Tensor<T>) -> Result<Tensor<T>> {
+    let t = t.compact()?;
+    let src = src.compact()?;
+    let ct = cstore(&t)?;
+    let csrc = cstore(&src)?;
+    let n = src.numel();
+    let mut out = alloc(ct, t.numel())?;
+    let f_copy = func::<T>(&ct.dev, "fill_k")?;
+    let numel = t.numel();
+    let zero = T::zero();
+    let mut b_copy = ct.dev.stream.launch_builder(&f_copy);
+    b_copy.arg(&mut out).arg(&numel).arg(&zero);
+    unsafe { b_copy.launch(LaunchConfig::for_num_elems(numel as u32)) }.map_err(cu)?;
+    
+    // Scatter
+    let index_data = index.host_data()?;
+    let index_d = ct.dev.stream.clone_htod(&index_data.iter().map(|&i| i as usize).collect::<Vec<_>>()).map_err(cu)?;
+    let dim_size = t.shape()[dim];
+    let inner: usize = t.shape()[dim + 1..].iter().product();
+    
+    let f = func::<T>(&ct.dev, "scatter_k")?;
+    let mut b = ct.dev.stream.launch_builder(&f);
+    b.arg(&mut out).arg(&csrc.data).arg(&index_d).arg(&n).arg(&dim_size).arg(&inner);
+    unsafe { b.launch(LaunchConfig::for_num_elems(n as u32)) }.map_err(cu)?;
+    
+    Ok(wrap(out, ct, t.shape()))
+}
