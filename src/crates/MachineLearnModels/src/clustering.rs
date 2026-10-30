@@ -401,5 +401,232 @@ impl<T: Float> HierarchicalClustering<T> {
 
 
 
+// ========================================== GMM Clustering ========================================================
 
+// Gaussian Mixture Model
+#[derive(Debug,Clone)]
+pub struct GaussianMixture<T: Float> {
+    n_components: usize,
+    max_iter: usize,
+    tolerance: T,
+    weights: Option<Vec<T>>,
+    means: Option<Vec<Vec<T>>>,
+    covariances: Option<Vec<Vec<T>>>,
+    responsibilities: Option<Vec<Vec<T>>>,
+}
+
+#[derive(Debug,Clone)]
+pub struct GMMConfig<T: Float> {
+    pub n_components: usize,
+    pub max_iter: usize,
+    pub tolerance: T,
+}
+
+impl<T: Float> Default for GMMConfig<T> {
+    fn default() -> Self { Self { n_components: 2, max_iter: 100, tolerance: T::from_f64(1e-4) } }
+}
+
+impl<T: Float + std::iter::Sum> GaussianMixture<T> {
+    pub fn new(config: GMMConfig<T>) -> Self { Self {n_components: config.n_components,max_iter: config.max_iter,tolerance: config.tolerance,weights: None,means: None,covariances: None,responsibilities: None} }
+
+    pub fn fit(&mut self, x: &Tensor<T>) -> Result<(),ModelError> {
+        if x.ndim() != 2 { return Err(ModelError::InvalidData("X must be 2-dimensional".into())); }
+        let n = x.shape()[0];
+        let p = x.shape()[1];
+        let data = x.to_vec()?;
+        let rows: Vec<Vec<T>> = (0..n).map(|i| data[i * p..(i + 1) * p].to_vec()).collect();
+
+        // Initialize parameters
+        self.initialize_parameters(&rows, p)?;
+
+        for _ in 0..self.max_iter {
+            let old_log_likelihood = self.log_likelihood(&rows)?;
+            
+            // E-step
+            self.e_step(&rows)?;
+            
+            // M-step
+            self.m_step(&rows)?;
+            
+            let new_log_likelihood = self.log_likelihood(&rows)?;
+            
+            if (old_log_likelihood - new_log_likelihood).abs() < self.tolerance {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn predict(&self, x: &Tensor<T>) -> Result<Vec<usize>,ModelError> {
+        let n = x.shape()[0];
+        let p = x.shape()[1];
+        let data = x.to_vec()?;
+        let rows: Vec<Vec<T>> = (0..n).map(|i| data[i * p..(i + 1) * p].to_vec()).collect();
+
+        let mut predictions = Vec::with_capacity(n);
+        for row in rows.iter() {
+            let mut best_component = 0;
+            let mut best_prob = T::zero();
+            
+            for (k, weight) in self.weights.as_ref().unwrap().iter().enumerate() {
+                let mean = &self.means.as_ref().unwrap()[k];
+                let prob = *weight * self.gaussian_pdf(row, mean, &self.covariances.as_ref().unwrap()[k]);
+                if prob > best_prob {
+                    best_prob = prob;
+                    best_component = k;
+                }
+            }
+            predictions.push(best_component);
+        }
+        
+        Ok(predictions)
+    }
+
+    pub fn fit_predict(&mut self, x: &Tensor<T>) -> Result<Vec<usize>, ModelError> {
+        self.fit(x)?;
+        self.predict(x)
+    }
+
+    fn initialize_parameters(&mut self, rows: &[Vec<T>], p: usize) -> Result<(), ModelError> {
+        let n = rows.len();
+        self.weights = Some(vec![T::from_f64(1.0 / self.n_components as f64); self.n_components]); // sum(wi) = 1
+        
+        let mut means = Vec::with_capacity(self.n_components);
+        for k in 0..self.n_components {
+            let idx = (k * n / self.n_components) % n;
+            means.push(rows[idx].clone());
+        }
+        self.means = Some(means);
+        
+        // Initialize covariances as 1s 
+        let mut covariances = Vec::with_capacity(self.n_components);
+        for _ in 0..self.n_components {
+            covariances.push(vec![T::one(); p]);
+        }
+        self.covariances = Some(covariances);
+        
+        Ok(())
+    }
+
+    fn e_step(&mut self, rows: &[Vec<T>]) -> Result<(),ModelError> {
+        // wx * N(mu,sigma,x) / sumation( wi * N(mu,sigma,i) )
+
+        let n = rows.len();
+        let mut responsibilities = vec![vec![T::zero(); self.n_components]; n];
+        for (i, row) in rows.iter().enumerate() {
+            let mut sum = T::zero();
+            for k in 0..self.n_components {
+                let weight = self.weights.as_ref().unwrap()[k];
+                let mean = &self.means.as_ref().unwrap()[k];
+                let cov = &self.covariances.as_ref().unwrap()[k];
+                responsibilities[i][k] = weight * self.gaussian_pdf(row, mean, cov);
+                sum += responsibilities[i][k];
+            }
+            
+            if sum > T::zero() {
+                for k in 0..self.n_components { responsibilities[i][k] /= sum; }
+            }
+        }
+        self.responsibilities = Some(responsibilities);
+        Ok(())
+    }
+
+    fn m_step(&mut self, rows: &[Vec<T>]) -> Result<(), ModelError> {
+        let n = rows.len();
+        let p = rows[0].len();
+        let responsibilities = self.responsibilities.as_ref().unwrap();
+        
+        // Update weights
+        let mut new_weights = vec![T::zero(); self.n_components];
+        for k in 0..self.n_components {
+            let sum: T = responsibilities.iter().map(|r| r[k]).sum();
+            new_weights[k] = sum / T::from_f64(n as f64);
+        }
+        self.weights = Some(new_weights);
+        
+        // Update means
+        let mut new_means = vec![vec![T::zero(); p]; self.n_components];
+        for k in 0..self.n_components {
+            let mut sum = T::zero();
+            for (i, row) in rows.iter().enumerate() {
+                let resp = responsibilities[i][k];
+                for (feat_idx, &val) in row.iter().enumerate() {
+                    new_means[k][feat_idx] = new_means[k][feat_idx] + resp * val;
+                }
+                sum = sum + resp;
+            }
+            
+            if sum > T::zero() {
+                for feat in 0..p {
+                    new_means[k][feat] = new_means[k][feat] / sum;
+                }
+            }
+        }
+        self.means = Some(new_means);
+        
+        // Update covariances (simplified diagonal)
+        let mut new_covariances = vec![vec![T::zero(); p]; self.n_components];
+        for k in 0..self.n_components {
+            let mut sum = T::zero();
+            for (i, row) in rows.iter().enumerate() {
+                let resp = responsibilities[i][k];
+                for feat in 0..p {
+                    let diff = row[feat] - self.means.as_ref().unwrap()[k][feat];
+                    new_covariances[k][feat] = new_covariances[k][feat] + resp * diff * diff;
+                }
+                sum = sum + resp;
+            }
+            
+            if sum > T::zero() {
+                for feat in 0..p {
+                    new_covariances[k][feat] = new_covariances[k][feat] / sum;
+                }
+            }
+        }
+        self.covariances = Some(new_covariances);
+        
+        Ok(())
+    }
+
+    fn gaussian_pdf(&self, x: &[T], mean: &[T], cov: &[T]) -> T {
+        // multivariate gaussian pdf = e^(-0.5 * (x - mean)^2 / cov)/(2*pi)^n/2 * det^0.5
+        // det = diagonal mat with covbariance (each dim is assumed independent)
+        let n = x.len();
+        let mut exp = T::zero();
+        
+        for i in 0..n {
+            let diff = x[i] - mean[i];
+            exp += (diff * diff) / (cov[i] + T::from_f64(1e-10));
+        }
+        
+        exp *= -T::from_f64(0.5);
+        
+        let mut det = T::one();
+        for i in 0..n {
+            det *= cov[i] + T::from_f64(1e-10);
+        }
+        
+        let norm = T::from_f64((2.0 * std::f64::consts::PI).powf(n as f64/2.0)) * det.sqrt();
+        exp.exp() / norm
+    }
+
+    // sumation(log(wi * N(mui,vari,i)))
+    fn log_likelihood(&self, rows: &[Vec<T>]) -> Result<T, ModelError> {
+        let mut log_likelihood = T::zero();
+        for row in rows.iter() {
+            let mut sample_prob = T::zero();
+            for k in 0..self.n_components {
+                let weight = self.weights.as_ref().unwrap()[k];
+                let mean = &self.means.as_ref().unwrap()[k];
+                let cov = &self.covariances.as_ref().unwrap()[k];
+                sample_prob += weight * self.gaussian_pdf(row, mean, cov);
+            }
+            log_likelihood += sample_prob.ln();
+        }
+        
+        Ok(log_likelihood)
+    }
+
+}
 }
