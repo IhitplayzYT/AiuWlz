@@ -112,22 +112,11 @@ pub fn series_to_data_column(series: &Series) -> Result<DataColumn> {
 /// Convert DataColumn to a Polars Series
 pub fn data_column_to_series(column: &DataColumn) -> Result<Series> {
     if column.is_empty() { return Ok(Series::new(&column.name, &[None as Option<i32>])); }
-    match &column.values[0] {
+    let non_null = column.values.iter().find(|value| !matches!(value, DataValue::Null));
+    match non_null.unwrap_or(&DataValue::Null) {
         DataValue::Null => {
-            let first_non_null = column.values.iter().find(|v| !matches!(v, DataValue::Null));
-            if let Some(DataValue::Bool(_)) = first_non_null {
-                let vals: Vec<Option<bool>> = column.values.iter().map(|v| match v {
-                        DataValue::Bool(b) => Some(*b),
-                        _ => None,
-                    }).collect();
-                Ok(Series::new(&column.name, vals))
-            } else {
-                let vals: Vec<Option<i32>> = column.values.iter().map(|v| match v {
-                        DataValue::Int32(i) => Some(*i),
-                        _ => None,
-                    }).collect();
-                Ok(Series::new(&column.name, vals))
-            }
+            let vals: Vec<Option<i32>> = vec![None; column.values.len()];
+            Ok(Series::new(&column.name, vals))
         }
         DataValue::Bool(_) => {
             let vals: Vec<Option<bool>> = column.values.iter().map(|v| match v {

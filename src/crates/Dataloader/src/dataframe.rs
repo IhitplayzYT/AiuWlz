@@ -7,6 +7,7 @@ use crate::types::{DataColumn, DataValue};
 use std::path::Path;
 use Tensors::dtype::Element;
 use Tensors::tensor::Tensor;
+use crate::preprocessing::{value_counts as count_values, LabelEncoder};
 
 /// Main DataFrame wrapper over Polars 
 #[derive(Clone)]
@@ -55,6 +56,122 @@ impl DataFrame {
     /// Get shape (rows, columns)
     pub fn shape(&self) -> (usize, usize) { (self.height(), self.width()) }
 
+    /// Split into training and test Dataframes. test_size is a fraction in (0, 1).
+    pub fn train_test_split(&self, test_size: f64, shuffle: bool, seed: Option<u64>) -> Result<(Self, Self)> {
+        if !(0.0 < test_size && test_size < 1.0) || !test_size.is_finite() { return Err(DataloaderError::Conversion("test_size must be between 0 and 1".to_string())); }
+        let rows = self.height();
+        if rows < 2 { return Err(DataloaderError::EmptyData); }
+        let test_count = ((rows as f64 * test_size).ceil() as usize).clamp(1, rows - 1);
+        let mut indices: Vec<usize> = (0..rows).collect();
+        if shuffle { deterministic_shuffle(&mut indices, seed.unwrap_or(0)); }
+        let mut test_mask = vec![false; rows];
+        for index in indices.into_iter().take(test_count) { test_mask[index] = true; }
+        self.split_by_mask(&test_mask)
+    }
+
+    /// Split while preserving the label proportions
+    pub fn stratified_train_test_split(&self, test_size: f64, stratify_by: &str, seed: Option<u64>) -> Result<(Self, Self)> {
+        if !(0.0 < test_size && test_size < 1.0) || !test_size.is_finite() { return Err(DataloaderError::Conversion("test_size must be between 0 and 1".to_string())); }
+        let labels = self.column(stratify_by)?;
+        if self.height() < 2 { return Err(DataloaderError::EmptyData); }
+        let groups = count_values(&labels);
+        if groups.iter().any(|(_, count)| *count < 2) { return Err(DataloaderError::Conversion("Every stratification category must have at least two rows".to_string())); }
+        let mut test_mask = vec![false; self.height()];
+        let mut rng = SplitMix64(seed.unwrap_or(0));
+        for (category, count) in groups {
+            let mut indices: Vec<usize> = labels.values.iter().enumerate().filter_map(|(index, value)| if *value == category { Some(index) } else { None }).collect();
+            rng.shuffle(&mut indices);
+            let test_count = ((count as f64 * test_size).round() as usize).clamp(1, count - 1);
+            for index in indices.into_iter().take(test_count) { test_mask[index] = true; }
+        }
+        self.split_by_mask(&test_mask)
+    }
+
+    // Split the dataset by a boolmask
+    pub fn split_by_mask(&self, test_mask: &[bool]) -> Result<(Self, Self)> {
+        let mask = Series::new("split_mask", test_mask.to_vec());
+        let mask = mask.bool().map_err(|error| DataloaderError::Conversion(error.to_string()))?;
+        let test = self.inner.filter(mask)?;
+        let train_mask: Vec<bool> = test_mask.iter().map(|value| !value).collect();
+        let mask = Series::new("split_mask", train_mask);
+        let mask = mask.bool().map_err(|error| DataloaderError::Conversion(error.to_string()))?;
+        let train = self.inner.filter(mask)?;
+        Ok((Self::from_polars(train), Self::from_polars(test)))
+    }
+
+    /// Names of categorical col
+    pub fn categorical_columns(&self) -> Vec<String> { self.cols().into_iter().filter(|name| { self.column(name).map(|column| column.values.iter().any(|value| matches!(value, DataValue::String(_) | DataValue::Bool(_) | DataValue::Date(_) |DataValue::DateTime(_) | DataValue::Time(_)))).unwrap_or(false) }).collect() }
+
+    /// Unique values in first-seen order, including null if present.
+    pub fn unique_values(&self, column: &str) -> Result<Vec<DataValue>> {
+        let values = self.column(column)?.values;
+        let mut unique = Vec::new();
+        for value in values { if !unique.contains(&value) { unique.push(value); } }
+        Ok(unique)
+    }
+
+    /// Count each value including null if present.
+    pub fn value_counts(&self, column: &str) -> Result<Vec<(DataValue, usize)>> {
+        Ok(count_values(&self.column(column)?))
+    }
+
+    /// Fit a label encoder on one column
+    pub fn label_encode(&self, column: &str, output_name: Option<&str>) -> Result<(Self, LabelEncoder)> {
+        let src = self.column(column)?;
+        let encoder = LabelEncoder::fit(&src);
+        let encoded = encoder.transform(&src, output_name.unwrap_or(&format!("{column}_encoded")))?;
+        let name = encoded.clone().name;
+        Ok((self.with_column(&name, encoded)?, encoder))
+    }
+
+    /// Replace a categorical column with boolean dummy columns, like pandas `get_dummies`.
+    /// Null values produce false in every dummy column.
+    pub fn one_hot_encode(&self, column: &str) -> Result<Self> {
+        let source = self.column(column)?;
+        let categories: Vec<DataValue> = self.unique_values(column)?.into_iter().filter(|value| !matches!(value, DataValue::Null)).collect();
+        let mut result = self.drop(&[column])?;
+        for category in categories {
+            let name = format!("{column}_{}", category);
+            if result.cols().iter().any(|existing| existing == &name) { return Err(DataloaderError::Conversion(format!("One-hot output column '{name}' already exists"))); }
+            let values = source.values.iter().map(|value| DataValue::Bool(*value == category)).collect();
+            result = result.with_column(&name.clone(), DataColumn::new(name, values))?;
+        }
+        Ok(result)
+    }
+
+    /// Standardize a numeric col
+    pub fn Standardize(&self, column: &str) -> Result<Self> {
+        let src = self.column(column)?;
+        let x = src.as_numeric_f64()?;
+        let non_null: Vec<f64> = x.iter().flatten().copied().collect();
+        if non_null.is_empty() { return Err(DataloaderError::EmptyData); }
+        let mean = non_null.iter().sum::<f64>() / non_null.len() as f64;
+        let std_dev = (non_null.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / non_null.len() as f64).sqrt();
+        let scaled = x.into_iter().map(|value| match value {
+            Some(value) if std_dev > 0.0 => DataValue::Float64((value - mean) / std_dev),
+            Some(_) => DataValue::Float64(0.0),
+            None => DataValue::Null,
+        }).collect();
+        self.with_column(column, DataColumn::new(column, scaled))
+    }
+
+    /// Scale a numeric column into [0, 1]
+    pub fn MinMaxScale(&self, column: &str) -> Result<Self> {
+        let source = self.column(column)?;
+        let numbers = source.as_numeric_f64()?;
+        let present: Vec<f64> = numbers.iter().flatten().copied().collect();
+        if present.is_empty() { return Err(DataloaderError::EmptyData); }
+        let min = present.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = present.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let range = max - min;
+        let scaled = numbers.into_iter().map(|value| match value {
+            Some(value) if range > 0.0 => DataValue::Float64((value - min) / range),
+            Some(_) => DataValue::Float64(0.0),
+            None => DataValue::Null,
+        }).collect();
+        self.with_column(column, DataColumn::new(column, scaled))
+    }
+
     /// Get col names
     pub fn cols(&self) -> Vec<String> { self.inner.get_column_names().iter().map(|x| x.to_string()).collect() }
 
@@ -102,6 +219,8 @@ impl DataFrame {
         ret.with_column(crate::conversion::data_column_to_series(&column)?)?;
         Ok(Self::from_polars(ret))
     }
+    pub fn add_column(&self,_name:&str,column:DataColumn) -> Result<Self>{ self.with_column(_name, column)  }
+    pub fn add_col(&self,_name:&str,column:DataColumn) -> Result<Self>{ self.with_column(_name, column)  }
 
     /// Drop cols
     pub fn drop(&self, names: &[&str]) -> Result<Self> {
@@ -250,5 +369,28 @@ impl<'a> GroupBy<'a> {
 
     /// Max of each group
     pub fn max(&self) -> Result<DataFrame> { Ok(DataFrame::from_polars(self.inner.max()?)) }
+}
+
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+        let mut value = self.0;
+        value = (value ^ (value >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94D049BB133111EB);
+        value ^ (value >> 31)
+    }
+
+    fn shuffle<T>(&mut self, values: &mut [T]) {
+        for index in (1..values.len()).rev() {
+            let other = (self.next() as usize) % (index + 1);
+            values.swap(index, other);
+        }
+    }
+}
+
+fn deterministic_shuffle<T>(values: &mut [T], seed: u64) {
+    SplitMix64(seed).shuffle(values);
 }
 
