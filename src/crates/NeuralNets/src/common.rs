@@ -87,3 +87,8 @@ pub struct EpochMetrics {
     pub loss: f64,
     pub samples: usize,
 }
+
+
+pub fn valid_unit(x: f64) -> bool {x.is_finite() && (0.0..1.0).contains(&x)}
+pub fn valid_positive(x: f64) -> bool {x.is_finite() && x > 0.0}
+pub fn valid_nonnegative(x: f64) -> bool {x.is_finite() && x >= 0.0}
