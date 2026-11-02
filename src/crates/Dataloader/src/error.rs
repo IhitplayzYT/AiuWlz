@@ -9,6 +9,8 @@ pub enum DataloaderError {
     Polars(#[from] polars::error::PolarsError),
     #[error("Tensor error: {0}")]
     Tensor(String),
+    #[error("Image error: {0}")]
+    Image(String),
     #[error("Conversion error: {0}")]
     Conversion(String),
     #[error("Column not found: {0}")]

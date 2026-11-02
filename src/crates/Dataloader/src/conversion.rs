@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::borrow::Cow;
 use std::hash::DefaultHasher;
 
 use crate::error::{DataloaderError, Result};
@@ -82,6 +83,12 @@ pub fn series_to_data_column(series: &Series) -> Result<DataColumn> {
         DataType::String => {
             series.str().map_err(|e| DataloaderError::Conversion(e.to_string()))?.into_iter().map(|opt| match opt {
                 Some(s) => DataValue::String(s.to_string()),
+                None => DataValue::Null,
+            }).collect()
+        }
+        DataType::Binary => {
+            series.binary().map_err(|e| DataloaderError::Conversion(e.to_string()))?.into_iter().map(|opt| match opt {
+                Some(bytes) => DataValue::Binary(bytes.to_vec()),
                 None => DataValue::Null,
             }).collect()
         }
@@ -200,6 +207,13 @@ pub fn data_column_to_series(column: &DataColumn) -> Result<Series> {
                     DataValue::String(s) => Some(s.clone()),
                     _ => None,
                 }).collect();
+            Ok(Series::new(&column.name, vals))
+        }
+        DataValue::Binary(_) => {
+            let vals: Vec<Option<Cow<'_, [u8]>>> = column.values.iter().map(|value| match value {
+                DataValue::Binary(bytes) => Some(Cow::Owned(bytes.clone())),
+                _ => None,
+            }).collect();
             Ok(Series::new(&column.name, vals))
         }
         DataValue::Date(_) => {

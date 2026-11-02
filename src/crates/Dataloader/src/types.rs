@@ -1,4 +1,3 @@
-use Tensors::{dtype::Float, tensor::Tensor};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use std::{fmt::{self, Display}, hash::{DefaultHasher, Hasher}};
 
@@ -21,7 +20,8 @@ pub enum DataValue {
     Date(NaiveDate),
     DateTime(NaiveDateTime),
     Time(NaiveTime),
-    Vec(Vec<f64>)
+    Vec(Vec<f64>),
+    Binary(Vec<u8>),
 }
 
 impl DataValue {
@@ -63,6 +63,7 @@ impl DataValue {
                 }
                 &bt   
             }
+            DataValue::Binary(v) => v.as_slice(),
             };
         hsher.write(k);
         hsher.finish()
@@ -104,7 +105,8 @@ impl DataValue {
             DataValue::Date(_) => "date",
             DataValue::DateTime(_) => "datetime",
             DataValue::Time(_) => "time",
-            DataValue::Vec(_) => "vec"
+            DataValue::Vec(_) => "vec",
+            DataValue::Binary(_) => "binary",
         }
     }
 }
@@ -129,6 +131,7 @@ impl Display for DataValue {
             DataValue::DateTime(v) => write!(f, "{}", v),
             DataValue::Time(v) => write!(f, "{}", v),
             DataValue::Vec(v) => write!(f, "{:?}", v),
+            DataValue::Binary(v) => write!(f, "<{} bytes>", v.len()),
         }
     }
 }
