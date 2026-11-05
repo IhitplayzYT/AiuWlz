@@ -25,14 +25,9 @@ pub enum DataValue {
 }
 
 impl DataValue {
-    /// Check if numeric for tensor conversion
-    pub fn is_numeric(&self) -> bool {
-        matches!(self, DataValue::Int8(_) | DataValue::Int16(_) | DataValue::Int32(_) | DataValue::Int64(_) | DataValue::UInt8(_) | DataValue::UInt16(_) | DataValue::UInt32(_) | DataValue::UInt64(_) | DataValue::Float32(_) | DataValue::Float64(_))
-    }
+    pub fn is_numeric(&self) -> bool { matches!(self, DataValue::Int8(_) | DataValue::Int16(_) | DataValue::Int32(_) | DataValue::Int64(_) | DataValue::UInt8(_) | DataValue::UInt16(_) | DataValue::UInt32(_) | DataValue::UInt64(_) | DataValue::Float32(_) | DataValue::Float64(_))}
 
-    pub fn is_tensorizable(&self) -> bool{
-        matches!(self,DataValue::Vec(_))
-    }
+    pub fn is_tensorizable(&self) -> bool{ matches!(self,DataValue::Vec(_)) }
 
     pub fn id(&self,hsher:&mut DefaultHasher) -> u64{
         let date_buf;
@@ -69,7 +64,6 @@ impl DataValue {
         hsher.finish()
     }
 
-    /// Convert to f64 if numeric
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             DataValue::Int8(v) => Some(*v as f64),
@@ -86,7 +80,6 @@ impl DataValue {
         }
     }
 
-    /// Get the type as str 
     pub fn type_name(&self) -> &'static str {
         match self {
             DataValue::Null => "null",
@@ -137,7 +130,6 @@ impl Display for DataValue {
 }
 
 
-/// Column with mlti type data
 #[derive(Clone, Debug)]
 pub struct DataColumn {
     pub name: String,
@@ -145,30 +137,15 @@ pub struct DataColumn {
 }
 
 impl DataColumn {
-    /// Create a new DataColumn
     pub fn new(name: impl Into<String>, values: Vec<DataValue>) -> Self { Self {name: name.into(),values} }
-
-    /// Get len of DataColumn
     pub fn len(&self) -> usize { self.values.len() }
-    
-    /// Check if DataColumn is empty
     pub fn is_empty(&self) -> bool { self.values.is_empty() }
-
-    /// Get the col's dtype
     pub fn dtype(&self) -> &'static str {
         if self.values.is_empty() { return "unknown";}
-        // for simplicity we determine col type by 1st elem in col
-        // since currently no support for ambigious objects 
         self.values[0].type_name()
     }
-
-    /// Check if all vals in column are numeric
     pub fn is_numeric(&self) -> bool { self.values.iter().all(|v| v.is_numeric() || matches!(v, DataValue::Null))}
-
-    /// Check if all vals in column are numeric
     pub fn is_tensorizable(&self) -> bool { self.values.iter().all(|v| v.is_tensorizable() || matches!(v, DataValue::Null))}
-
-    /// Get numeric values as f64, skipping nulls
     pub fn as_numeric_f64(&self) -> Result<Vec<Option<f64>>, crate::error::DataloaderError> {
         if !self.is_numeric() { return Err(crate::error::DataloaderError::Conversion(format!("Column '{}' is not numeric",self.name))); }
         Ok(self.values.iter().map(|v| v.as_f64()).collect())
@@ -176,7 +153,6 @@ impl DataColumn {
 
 }
 
-/// Options for loading data from csv and excels
 #[derive(Clone, Debug, Default)]
 pub struct LoadOptions {
     pub has_header: bool,
@@ -188,31 +164,22 @@ pub struct LoadOptions {
 
 impl LoadOptions {
     pub fn new() -> Self { Self::default() }
-
-    /// Set flag of header and return Self
     pub fn with_header(mut self, has_header: bool) -> Self {
         self.has_header = has_header;
         self
     }
-
-    /// Set seperator and return Self
     pub fn with_separator(mut self, sep: char) -> Self {
         self.separator = Some(sep);
         self
     }
-
-    /// Set no of starting rows to skip and return Self
     pub fn with_skip_rows(mut self, skip: usize) -> Self {
         self.skip_rows = skip;
         self
     }
-
-    /// Set following  and return Self
     pub fn with_null_values(mut self, nulls: Vec<String>) -> Self {
         self.null_values = Some(nulls);
         self
     }
-
     pub fn with_dtype_overrides(mut self, overrides: Vec<(String, String)>) -> Self {
         self.dtype_overrides = Some(overrides);
         self
