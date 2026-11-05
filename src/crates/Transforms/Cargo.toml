@@ -7,3 +7,4 @@ edition = "2024"
 Tensors = { path = "../Tensors" }
 MachineLearnModels = { path = "../MachineLearnModels" }
 rand = "0.8"
+image = { version = "0.25", default-features = false }

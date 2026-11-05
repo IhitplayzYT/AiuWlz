@@ -1,3 +1,5 @@
+pub mod image;
+
 pub mod dimensionality_reduction {
     use MachineLearnModels::errors::ModelError;
     use Tensors::{dtype::Float, tensor::Tensor};
