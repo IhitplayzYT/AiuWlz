@@ -121,7 +121,112 @@ impl<T: Float> Optimizer<T> {
         Ok(self)
     }
 
+    pub fn update(&mut self, params: &mut [Tensor<T>], grads: &[Tensor<T>]) -> Result<()> {
+        if params.len() != grads.len() { return Err(invalid("Diff no of param and grads recieved")); }
+        for (p, g) in params.iter().zip(grads) {
+            if p.shape() != g.shape() { return Err(invalid(format!("Grad shape {:?} does not match param shape {:?}",g.shape(),p.shape()))); }
+            p.same_device(g)?;
+        }
 
+        let grads = if let Some(max_norm) = self.max_grad_norm {
+            let t = grads.iter().map(Tensor::flatten).collect::<std::result::Result<Vec<Tensor<T>>, _>>()?;
+            let refs: Vec<&Tensor<T>> = t.iter().collect();
+            let norm = if refs.is_empty() { T::zero() } else { Tensor::cat(&refs, 0)?.square()?.sum_all()?.sqrt() };
+            // Scale down the vecs to max of max_norm
+            if norm > max_norm { grads.iter().map(|g| g.mul_scalar(max_norm / norm)).collect::<std::result::Result<Vec<_>, _>>()?} 
+            else { grads.to_vec() }
+        } else {
+            grads.to_vec()
+        };
+        if self.dx.len() != params.len() || self.dx2.len() != params.len() || self.dx.iter().zip(params.iter()).any(|(m, p)| m.shape() != p.shape()) || self.dx2.iter().zip(params.iter()).any(|(v, p)| v.shape() != p.shape()) {
+            self.dx = params.iter().map(Tensor::zeros_like).collect();
+            self.dx2 = params.iter().map(|p| match self.kind {
+                    OptimizerKind::Adagrad {initial_accumulator,..} => p.fill_like(T::from_f64(initial_accumulator)),
+                    _ => p.zeros_like(),
+                }).collect();
+            self.step = 0;
+        }
+        
+        self.step += 1;
+        let lr = self.lr;
+        for i in 0..params.len() {
+            let update = match self.kind {
+                // grad = grad
+                OptimizerKind::Sgd => grads[i].clone(),
+                // acc_grad = gamma * acc_grad+ cur_grad
+                // update = acc_grad
+                OptimizerKind::Momentum { momentum } => {
+                    self.dx[i] = self.dx[i].mul_scalar(T::from_f64(momentum))?.add(&grads[i])?;
+                    self.dx[i].clone()
+                },
+                // acc_grad = acc_grad * gamma + cur_grad
+                // update = acc_grad * gamma + grad
+                OptimizerKind::Nesterov { momentum } => {
+                    self.dx[i] = self.dx[i].mul_scalar(T::from_f64(momentum))?.add(&grads[i])?;
+                    grads[i].add(&self.dx[i].mul_scalar(T::from_f64(momentum))?)?
+                },
+                // acc_momentum = acc_momentum * rho + grad^2 * (1 - rho)\
+                // update = grad / (sqrt(acc_momentum) + eps)
+                OptimizerKind::RmsProp { rho, epsilon } => {
+                    let rho = T::from_f64(rho);
+                    self.dx2[i] = self.dx2[i].mul_scalar(rho)?.add(&grads[i].square()?.mul_scalar(T::one() - rho)?)?;
+                    grads[i].div(&self.dx2[i].sqrt()?.add_scalar(T::from_f64(epsilon))?)?
+                },
+                // acc_grad = acc_grad * beta1 + grad * (1 - beta1)
+                // acc_momentum = acc_momentum * beta2 + grad^2 * (1 - beta2)
+                // Zero init bias during earlys timesteps
+                // acc_grad = acc_grad / (1 - beta1^t)
+                // acc_momentum = acc_momentum / (1 - beta2^t)
+                // update = acc_momentum / (sqrt(acc_grad) + eps)
+                OptimizerKind::Adam {beta1,beta2,epsilon} => {
+                    let (b1, b2) = (T::from_f64(beta1), T::from_f64(beta2));
+                    self.dx[i] = self.dx[i].mul_scalar(b1)?.add(&grads[i].mul_scalar(T::one() - b1)?)?;
+                    self.dx2[i] = self.dx2[i].mul_scalar(b2)?.add(&grads[i].square()?.mul_scalar(T::one() - b2)?)?;
+                    let m = self.dx[i].div_scalar(T::from_f64(1.0 - beta1.powf(self.step as f64)))?;
+                    let v = self.dx2[i].div_scalar(T::from_f64(1.0 - beta2.powf(self.step as f64)))?;
+                    m.div(&v.sqrt()?.add_scalar(T::from_f64(epsilon))?)?
+                },
+                // acc_grad = acc_grad * beta1 + grad * (1 - beta1)
+                // acc_momentum = acc_momentum * beta2 + grad^2 * (1 - beta2)
+                // Zero init bias during earlys timesteps
+                // acc_grad = acc_grad / (1 - beta1^t)
+                // acc_momentum = acc_momentum / (1 - beta2^t)
+                // update = acc_momentum / (sqrt(acc_grad) + eps)
+                // param = param - param * lr * decay - update * lr
+                // param = param(1 - lr*decay) - update*lr
+                OptimizerKind::AdamW {beta1,beta2,epsilon,..} => {
+                    let (b1, b2) = (T::from_f64(beta1), T::from_f64(beta2));
+                    self.dx[i] = self.dx[i].mul_scalar(b1)?.add(&grads[i].mul_scalar(T::one() - b1)?)?;
+                    self.dx2[i] = self.dx2[i].mul_scalar(b2)?.add(&grads[i].square()?.mul_scalar(T::one() - b2)?)?;
+                    let m = self.dx[i].div_scalar(T::from_f64(1.0 - beta1.powf(self.step as f64)))?;
+                    let v = self.dx2[i].div_scalar(T::from_f64(1.0 - beta2.powf(self.step as f64)))?;
+                    m.div(&v.sqrt()?.add_scalar(T::from_f64(epsilon))?)?
+                },
+                // Used AI to make adagrad sicne a bigt confused on formula
+                OptimizerKind::Adagrad {epsilon,lr_decay,weight_decay,..} => {
+                    let grad = if weight_decay != 0.0 {grads[i].add(&params[i].mul_scalar(T::from_f64(weight_decay))?)?} else {grads[i].clone()};
+                    self.dx2[i] = self.dx2[i].add(&grad.square()?)?;
+                    grad.div(&self.dx2[i].sqrt()?.add_scalar(T::from_f64(epsilon))?)?.mul_scalar(T::from_f64(1.0 / (1.0 + lr_decay * (self.step - 1) as f64)))?
+                },
+                // acc_grad = acc_grad * rho + (1 - rho) * grad^2
+                // update = sqrt(acc_momentum + eps)/ sqrt(acc_grad + eps) * grad
+                // acc_momentum = rho * acc_momentum + (1 - rho) * update^2
+                OptimizerKind::Adadelta { rho, epsilon } => {
+                    let rho = T::from_f64(rho);
+                    self.dx[i] = self.dx[i].mul_scalar(rho)?.add(&grads[i].square()?.mul_scalar(T::one() - rho)?)?;
+                    let update = self.dx2[i].add_scalar(T::from_f64(epsilon))?.sqrt()?.div(&self.dx[i].add_scalar(T::from_f64(epsilon))?.sqrt()?)?.mul(&grads[i])?;
+                    self.dx2[i] = self.dx2[i].mul_scalar(rho)?.add(&update.square()?.mul_scalar(T::one() - rho)?)?;
+                    update
+                }
+            };
+
+            match self.kind {
+                OptimizerKind::AdamW { weight_decay, .. } if weight_decay != 0.0 => { params[i] = params[i].mul_scalar(T::one() - lr * T::from_f64(weight_decay))?.sub(&update.mul_scalar(lr)?)?; }
+                _ => params[i] = params[i].sub(&update.mul_scalar(lr)?)?,
+            }
+        }
+        Ok(())
+    }
 }
 
 
