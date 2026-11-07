@@ -1,0 +1,332 @@
+use Tensors::{dtype::Float, tensor::Tensor};
+use Utilities::{device::Device::Device, random::Random::Rng};
+
+use crate::{Activation, Initializer, Result, common::{invalid, validate_activation}, layer::{activate_tensor, initialize}};
+
+/// 2D convolution layer
+/// Input & Output = [batch_sz,channels,height,width]
+/// Kernel = [output_channels,input_channels,height,width]
+#[derive(Clone,Debug)]
+pub struct Conv2d<T: Float> {
+    pub in_channels: usize,
+    pub out_channels: usize,
+    pub kernel: (usize, usize),
+    pub stride: (usize, usize),
+    pub padding: (usize, usize),
+    pub weights: Tensor<T>,
+    pub bias: Tensor<T>, // [1, out_channels, 1, 1]
+    pub activation: Activation,
+}
+
+impl<T: Float> Conv2d<T> {
+
+    pub fn new(in_channels: usize,out_channels: usize,kernel: (usize, usize),stride: (usize, usize),padding: (usize, usize),activation: Activation,initializer: Initializer,rng: &mut Rng,device: Device) -> Result<Self> {
+        if in_channels == 0 || out_channels == 0 || kernel.0 == 0 || kernel.1 == 0 || stride.0 == 0 || stride.1 == 0{ return Err(invalid("Conv channels, kernel, and strides must be positive")); }
+        validate_activation(activation)?;
+        let fan_in = in_channels * kernel.0 * kernel.1;
+        let fan_out = out_channels * kernel.0 * kernel.1;
+        let weights = initialize(&[out_channels, in_channels, kernel.0, kernel.1],fan_in,fan_out,initializer,rng,)?.to_device(device)?;
+        let bias = Tensor::zeros(&[1, out_channels, 1, 1]).to_device(device)?;
+        Ok(Self {in_channels,out_channels,kernel,stride,padding,weights,bias,activation})
+    }
+
+    pub fn forward(&self, input: &Tensor<T>) -> Result<Tensor<T>> {
+        if input.ndim() != 4 || input.shape()[1] != self.in_channels { return Err(invalid(format!("Conv2d expects [batch, {}, height, width], got {:?}",self.in_channels,input.shape()))); }
+        activate_tensor(&input.conv2d(&self.weights, Some(&self.bias), self.stride, self.padding)?,self.activation)
+    }
+
+    /// Set the weigth and bias
+    pub fn set_parameters(&mut self, params: &[Tensor<T>]) -> Result<()> {
+        if params.len() != 2 || params[0].shape() != self.weights.shape() || params[1].shape() != self.bias.shape() { return Err(invalid("Conv2d param shape is diff")); }
+        params[0].same_device(&params[1])?;
+        if params[0].device() != self.weights.device() { return Err(invalid("Conv2d parameters aren't on same device as the layer")); }
+        self.weights = params[0].clone();
+        self.bias = params[1].clone();
+        Ok(())
+    }
+
+    pub fn to_device(&mut self,dev:Device) -> Result<()>{
+        self.weights = self.weights.to_device(dev)?;
+        self.bias = self.bias.to_device(dev)?;
+        Ok(())
+    }
+
+    pub fn with_stride(mut self,stride: (usize, usize)) -> Self{
+        self.stride = stride;
+        self 
+    }
+
+    pub fn param_count(&self) -> usize{ self.out_channels * (self.in_channels * self.kernel.0 * self.kernel.1 + 1) }
+}
+
+/// 1D convolution
+/// Input & Output:[batch, channels, length]
+/// weight:[out, in, kernel]
+#[derive(Clone,Debug)]
+pub struct Conv1d<T: Float> {
+    pub in_channels: usize,
+    pub out_channels: usize,
+    pub kernel_size: usize,
+    pub stride: usize,
+    pub padding: usize,
+    pub weights: Tensor<T>,
+    pub bias: Tensor<T>,
+    pub activation: Activation,
+}
+
+impl<T: Float> Conv1d<T> {
+
+    pub fn new(in_channels: usize,out_channels: usize,kernel_size: usize,stride: usize,padding: usize,activation: Activation,initializer: Initializer,rng: &mut Rng,device: Device) -> Result<Self> {
+        if in_channels == 0 || out_channels == 0 || kernel_size == 0 || stride == 0 { return Err(invalid("Conv1d channels, kernel, and stride must be positive")); }
+        validate_activation(activation)?;
+        let weights = initialize(&[out_channels, in_channels, kernel_size],in_channels * kernel_size,out_channels * kernel_size,initializer,rng)?.to_device(device)?;
+        let bias = Tensor::zeros(&[1, out_channels, 1]).to_device(device)?;
+        Ok(Self {in_channels,out_channels,kernel_size,stride,padding,weights,bias,activation})
+    }
+
+    pub fn forward(&self, input: &Tensor<T>) -> Result<Tensor<T>> {
+        validate_conv1d_input(input, self.in_channels)?;
+        let x = input.unsqueeze(2)?;
+        let w = self.weights.reshape(&[self.out_channels as isize,self.in_channels as isize,1,self.kernel_size as isize])?;
+        let b = self.bias.reshape(&[1, self.out_channels as isize, 1, 1])?;
+        activate_tensor(&x.conv2d(&w, Some(&b), (1, self.stride), (0, self.padding))?.squeeze(2)?,self.activation)
+    }
+
+    pub fn set_parameters(&mut self, params: &[Tensor<T>]) -> Result<()> {
+        if params.len() != 2 || params[0].shape() != self.weights.shape() || params[1].shape() != self.bias.shape(){ return Err(invalid("Conv1d parameter shape mismatch")); }
+        params[0].same_device(&params[1])?;
+        if params[0].device() != self.weights.device() { return Err(invalid("Conv1d params should be on same device as the layer")); }
+        self.weights = params[0].clone();
+        self.bias = params[1].clone();
+        Ok(())
+    }
+
+    pub fn with_stride(mut self,stride: usize) -> Self{
+        self.stride = stride;
+        self
+    }
+
+    pub fn to_device(&mut self,dev: Device) -> Result<()> {
+        self.weights = self.weights.to_device(dev)?;
+        self.bias = self.bias.to_device(dev)?;
+        Ok(())
+    }
+
+    pub fn param_count(&self) -> usize{ self.out_channels * (self.in_channels * self.kernel_size + 1) }
+
+}
+
+/// 2D Max pooling
+#[derive(Clone, Copy, Debug)]
+pub struct MaxPool2d {
+    pub kernel: (usize, usize),
+    pub stride: (usize, usize),
+    pub padding: (usize, usize),
+}
+
+impl MaxPool2d {
+
+    pub fn new(kernel: (usize, usize),stride: (usize, usize),padding: (usize, usize)) -> Result<Self> {
+        validate_pool(kernel, stride)?;
+        Ok(Self {kernel,stride,padding})
+    }
+
+    pub fn with_kernel(mut self,kernel: (usize, usize)) -> Self{
+        self.kernel = kernel;
+        self
+    }
+
+    pub fn with_stride(mut self,stride: (usize, usize)) -> Self{
+        self.stride = stride;
+        self
+    }
+    
+    pub fn with_padding(mut self,padding: (usize, usize)) -> Self{
+        self.padding = padding;
+        self
+    }
+
+    pub fn set_params(&mut self,kernel: Option<(usize, usize)>, stride: Option<(usize, usize)>,padding: Option<(usize, usize)>){
+        if let Some(padding) = padding{
+            self.padding = padding;
+        }
+
+        if let Some(kernel) = kernel{
+            if kernel.0 != 0 && kernel.1 != 0 {self.kernel = kernel;}
+        }
+
+        if let Some(stride) = stride{
+            if stride.0 != 0 && stride.1 != 0 {self.stride = stride;}
+        }
+
+    }
+
+    pub fn param_count(&self) -> usize { 0 }
+}
+
+/// Avg Pooling
+#[derive(Clone, Copy, Debug)]
+pub struct AvgPool2d {
+    pub kernel: (usize, usize),
+    pub stride: (usize, usize),
+    pub padding: (usize, usize),
+    pub count_pad: bool,
+}
+
+impl AvgPool2d {
+
+    pub fn new(kernel: (usize, usize),stride: (usize, usize),padding: (usize, usize),count_pad: bool) -> Result<Self> {
+        validate_pool(kernel, stride)?;
+        Ok(Self {kernel,stride,padding,count_pad})
+    }
+
+    pub fn with_kernel(mut self,kernel: (usize, usize)) -> Self{
+        self.kernel = kernel;
+        self
+    }
+
+    pub fn with_stride(mut self,stride: (usize, usize)) -> Self{
+        self.stride = stride;
+        self
+    }
+    
+    pub fn with_padding(mut self,padding: (usize, usize)) -> Self{
+        self.padding = padding;
+        self
+    }
+
+    pub fn with_pad_count(mut self) -> Self{
+        self.count_pad = true;
+        self
+    }
+
+    pub fn set_params(&mut self,kernel: Option<(usize, usize)>, stride: Option<(usize, usize)>,padding: Option<(usize, usize)>,count_pad:Option<bool>){
+        if let Some(padding) = padding{
+            self.padding = padding;
+        }
+
+        if let Some(kernel) = kernel{
+            if kernel.0 != 0 && kernel.1 != 0 {self.kernel = kernel;}
+        }
+
+        if let Some(stride) = stride{
+            if stride.0 != 0 && stride.1 != 0 {self.stride = stride;}
+        }
+
+        if let Some(count_pad) = count_pad{
+            self.count_pad = count_pad;
+        }
+
+    }
+
+    pub fn param_count(&self) -> usize { 0 }
+}
+
+
+/// 1D max pool
+#[derive(Clone, Copy, Debug)]
+pub struct MaxPool1d {
+    pub kernel_size: usize,
+    pub stride: usize,
+    pub padding: usize,
+}
+
+impl MaxPool1d {
+
+    pub fn new(kernel_size: usize, stride: usize, padding: usize) -> Result<Self> {
+        validate_pool((1, kernel_size), (1, stride))?;
+        Ok(Self {kernel_size,stride,padding})
+    }
+
+    pub fn with_kernel(mut self,kernel: usize) -> Self{
+        self.kernel_size = kernel;
+        self
+    }
+
+    pub fn with_stride(mut self,stride: usize) -> Self{
+        self.stride = stride;
+        self
+    }
+    
+    pub fn with_padding(mut self,padding: usize) -> Self{
+        self.padding = padding;
+        self
+    }
+
+    pub fn set_params(&mut self,kernel: Option<usize>, stride: Option<usize>,padding: Option<usize>){
+        if let Some(padding) = padding{
+            self.padding = padding;
+        }
+
+        if let Some(kernel_size) = kernel{
+            if kernel_size != 0 {self.kernel_size = kernel_size;}
+        }
+
+        if let Some(stride) = stride{
+            if stride != 0 {self.stride = stride;}
+        }
+
+    }
+
+    pub fn param_count(&self) -> usize { 0 }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AvgPool1d {
+    pub kernel_size: usize,
+    pub stride: usize,
+    pub padding: usize,
+    pub count_pad: bool,
+}
+
+impl AvgPool1d {
+
+    pub fn new(kernel_size: usize,stride: usize,padding: usize,count_pad: bool) -> Result<Self> {
+        validate_pool((1, kernel_size), (1, stride))?;
+        Ok(Self {kernel_size,stride,padding,count_pad})
+    }
+
+    pub fn with_kernel(mut self,kernel: usize) -> Self{
+        self.kernel_size = kernel;
+        self
+    }
+
+    pub fn with_stride(mut self,stride: usize) -> Self{
+        self.stride = stride;
+        self
+    }
+    
+    pub fn with_padding(mut self,padding: usize) -> Self{
+        self.padding = padding;
+        self
+    }
+
+    pub fn with_pad_count(mut self) -> Self{
+        self.count_pad = true;
+        self
+    }
+
+    pub fn set_params(&mut self,kernel: Option<usize>, stride: Option<usize>,padding: Option<usize>,pad_count: Option<bool>){
+        if let Some(padding) = padding{
+            self.padding = padding;
+        }
+
+        if let Some(kernel_size) = kernel{
+            if kernel_size != 0 {self.kernel_size = kernel_size;}
+        }
+
+        if let Some(stride) = stride{
+            if stride != 0 {self.stride = stride;}
+        }
+
+        if let Some(pad_count) = pad_count{
+            self.count_pad = pad_count;
+        }
+
+    }
+
+    pub fn param_count(&self) -> usize { 0 }
+}
+
+pub fn validate_pool(kernel: (usize, usize), stride: (usize, usize)) -> Result<()> { if kernel.0 == 0 || kernel.1 == 0 || stride.0 == 0 || stride.1 == 0 {Err(invalid("Pooling kernel and stride dims must be positive"))} else {Ok(())} }
+pub fn validate_conv1d_input<T: Float>(input: &Tensor<T>, channels: usize) -> Result<()> { if input.ndim() != 3 || input.shape()[1] != channels { return Err(invalid(format!("Conv1d expected [batch, {channels}, length], got {:?}",input.shape()))); } else {Ok(())} }
