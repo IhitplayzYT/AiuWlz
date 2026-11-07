@@ -1,4 +1,5 @@
 use Utilities::device::Device::Device;
+#[cfg(feature = "cuda")]
 use crate::cuda::sort;
 use crate::dtype::{Element, Float};
 use crate::error::{Result, TensorError};
@@ -666,7 +667,7 @@ impl<T: Element> Tensor<T> {
     }
 
     /// Scatter values at indices along dim
-    pub fn scatter(&self, dim: isize, index: &Tensor<i64>, src: &Tensor<T>) -> Result<Self> {
+    pub fn scatter(&self, dim: isize, index: &Tensor<i32>, src: &Tensor<T>) -> Result<Self> {
         let d = normalize_dim(dim, self.ndim())?;
         if index.shape() != src.shape() { return Err(TensorError::ShapeMismatch { op: "scatter", lhs: index.shape().to_vec(), rhs: src.shape().to_vec() }); }
         match &*self.storage {

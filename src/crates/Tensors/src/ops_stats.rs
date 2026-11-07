@@ -162,13 +162,13 @@ impl<T: Element> Tensor<T> {
     pub fn prod_all(&self) -> TensorResult<T> { self.flatten()?.prod(0, false)?.item() }
 
     /// Index of the max elem along dim
-    pub fn argmax(&self, dim: isize, keepdim: bool) -> TensorResult<Tensor<i64>> {
-        self.reduce_with(dim, keepdim, |s| crate::par::argmax(s) as i64)
+    pub fn argmax(&self, dim: isize, keepdim: bool) -> TensorResult<Tensor<i32>> {
+        self.reduce_with(dim, keepdim, |s| crate::par::argmax(s) as i32)
     }
     
     /// Index of the min elem along dim
-    pub fn argmin(&self, dim: isize, keepdim: bool) -> TensorResult<Tensor<i64>> {
-        self.reduce_with(dim, keepdim, |s| crate::par::argmin(s) as i64)
+    pub fn argmin(&self, dim: isize, keepdim: bool) -> TensorResult<Tensor<i32>> {
+        self.reduce_with(dim, keepdim, |s| crate::par::argmin(s) as i32)
     }
 
     /// Mean of elems along dim

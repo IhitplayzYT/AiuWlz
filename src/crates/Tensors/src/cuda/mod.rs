@@ -502,7 +502,7 @@ pub fn masked_select<T: Element>(t: &Tensor<T>, mask: &Tensor<T>) -> Result<Tens
     Ok(wrap(out, ct, &[count]))
 }
 
-pub fn scatter<T: Element>(t: &Tensor<T>, dim: usize, index: &Tensor<i64>, src: &Tensor<T>) -> Result<Tensor<T>> {
+pub fn scatter<T: Element>(t: &Tensor<T>, dim: usize, index: &Tensor<i32>, src: &Tensor<T>) -> Result<Tensor<T>> {
     let t = t.compact()?;
     let src = src.compact()?;
     let ct = cstore(&t)?;
@@ -522,7 +522,7 @@ pub fn scatter<T: Element>(t: &Tensor<T>, dim: usize, index: &Tensor<i64>, src: 
     let dim_size = t.shape()[dim];
     let inner: usize = t.shape()[dim + 1..].iter().product();
     
-    let f = func::<T>(&ct.dev, "scatter_k")?;
+    let f = func::<T>(&ct.dev, "scatter_dim_k")?;
     let mut b = ct.dev.stream.launch_builder(&f);
     b.arg(&mut out).arg(&csrc.data).arg(&index_d).arg(&n).arg(&dim_size).arg(&inner);
     unsafe { b.launch(LaunchConfig::for_num_elems(n as u32)) }.map_err(cu)?;

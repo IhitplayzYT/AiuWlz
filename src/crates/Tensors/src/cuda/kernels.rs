@@ -404,13 +404,13 @@ extern "C" __global__ void masked_select_k(T* out, const T* inp, const T* mask, 
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i >= n) return;
     if (mask[i] != (T)0) {
-        size_t idx = atomicAdd(count, 1);
+        size_t idx = atomicAdd((unsigned long long*)count, 1);
         out[idx] = inp[i];
     }
 }
 
-// Parallel scatter: write src values at indices
-extern "C" __global__ void scatter_k(T* out, const T* src, const size_t* indices, size_t n, size_t dim_size, size_t inner) {
+// Parallel scatter with dim_size and inner: write src values at indices
+extern "C" __global__ void scatter_dim_k(T* out, const T* src, const size_t* indices, size_t n, size_t dim_size, size_t inner) {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i >= n) return;
     size_t outer_i = i / (dim_size * inner);

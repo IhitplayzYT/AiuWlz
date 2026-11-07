@@ -14,6 +14,9 @@ members =[
     "src/crates/VectorDB",
 ]
 
+[workspace.dependencies]
+Tensors = { path = "src/crates/Tensors" }
+
 [package]
 name = "AiuWlz"
 description = ""
@@ -23,3 +26,15 @@ license = "GPL-3.0-only"
 license-file = "LICENSE"
 
 [dependencies]
+Dataloader = { path = "src/crates/Dataloader"}
+MachineLearnModels = { path = "src/crates/MachineLearnModels"}
+Metrics = { path = "src/crates/Metrics"}
+ModelSaveLoad = { path = "src/crates/ModelSaveLoad"}
+NeuralNets= { path = "src/crates/NeuralNets"}
+Optimisers = { path = "src/crates/Optimisers"}
+Serving = { path = "src/crates/Serving"}
+Tensors = { path = "src/crates/Tensors" }
+Transforms = { path = "src/crates/Transforms"}
+Utilities = { path = "src/crates/Utilities"}
+Macro = { path = "src/crates/Macro"}
+VectorDB = { path = "src/crates/VectorDB"}
