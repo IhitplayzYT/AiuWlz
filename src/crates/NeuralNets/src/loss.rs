@@ -104,14 +104,15 @@ fn validate_categorical<T: Float>(prediction: &Comp<T>, target: &Tensor<T>) -> R
     Ok(())
 }
 
-pub fn one_hot<T: Float>(labels: &Tensor<i64>,classes: usize,device: Utilities::device::Device::Device) -> Result<Tensor<T>> {
+pub fn one_hot<T: Float>(labels: &Tensor<i32>,classes: usize,device: Utilities::device::Device::Device) -> Result<Tensor<T>> {
     if classes == 0 { return Err(invalid("one-hot class count must be positive"));}
-    if labels.numel() > 0 && (labels.min_all()? < 0 || labels.max_all()? >= classes as i64) { return Err(invalid("class label is outside the configured class range"));}
+    if labels.numel() > 0 && (labels.min_all()? < 0 || labels.max_all()? >= classes as i32) { return Err(invalid("class label is outside the configured class range"));}
     let count = labels.numel();
-    let indices = labels.reshape(&[count as isize, 1])?.to_device(device)?;
-    let base = Tensor::<T>::zeros(&[count, classes]).to_device(device)?;
-    let values = Tensor::<T>::ones(&[count, 1]).to_device(device)?;
+    // Keep labels on CPU for scatter operation, then move result to target device
+    let indices = labels.reshape(&[count as isize, 1])?;
+    let base = Tensor::<T>::zeros(&[count, classes]);
+    let values = Tensor::<T>::ones(&[count, 1]);
     let mut output_shape: Vec<isize> = labels.shape().iter().map(|&d| d as isize).collect();
     output_shape.push(classes as isize);
-    Ok(base.scatter(1, &indices, &values)?.reshape(&output_shape)?)
+    Ok(base.scatter(1, &indices, &values)?.reshape(&output_shape)?.to_device(device)?)
 }
