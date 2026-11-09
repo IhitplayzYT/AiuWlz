@@ -3,6 +3,35 @@ use Utilities::{device::Device::Device, random::Random::Rng};
 
 use crate::{Activation, Initializer, Result, common::{invalid, validate_activation, validate_feature_input}, layer::{Layer, activate_tensor, initialize}};
 
+/// Identity layer
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Identity;
+
+impl Identity {
+    /// Creates a new Identity layer
+    pub fn new() -> Self { Self }
+    /// No of trainable params in layer
+    pub fn param_count(&self) -> usize { 0 }
+}
+
+/// Unflatten layer
+#[derive(Clone, Debug)]
+pub struct Unflatten {
+    pub dim: isize,
+    pub unflattened_size: Vec<usize>,
+}
+
+impl Unflatten {
+    /// Creates a new Unflatten layer
+    pub fn new(dim: isize,unflattened_size: Vec<usize>) -> Result<Self> {
+        if unflattened_size.is_empty() || unflattened_size.contains(&0) { return Err(invalid("Unflatten dimensions must be positive and non zero")); }
+        Ok(Self {dim,unflattened_size})
+    }
+
+    /// No of trainable params in layer
+    pub fn param_count(&self) -> usize { 0 }
+}
+
 /// Dense layer
 #[derive(Debug,Clone)]
 pub struct Dense<T: Float> {
@@ -144,6 +173,8 @@ pub struct BatchNorm1d<T: Float> {
     pub epsilon: T,
     pub momentum: T,
 }
+pub type BatchNorm<T> = BatchNorm1d<T>;
+pub type BatchNorm1D<T> = BatchNorm1d<T>;
 
 impl<T: Float> BatchNorm1d<T> {
 
@@ -194,6 +225,12 @@ impl Dropout {
         Ok(Self { probability })
     }
 
+    /// Chaining op for setting probability
+    pub fn with_prob(mut self,probability: f64) -> Self{
+        self.probability = probability;
+        self
+    }
+
     /// No of trainable params
     pub fn param_count(&self) -> usize { 0 }
 
@@ -205,8 +242,10 @@ pub struct ResidualBlock<T: Float> {
     pub layers: Vec<Layer<T>>,
 }
 pub type Skip<T> = ResidualBlock<T>;
+pub type Residual<T> = ResidualBlock<T>;
 
 impl<T: Float> ResidualBlock<T> {
+
     /// Create a new Residualblock layer
     pub fn new(layers: Vec<Layer<T>>) -> Result<Self> {
         if layers.is_empty() { return Err(invalid("Residual block must contain at least 1 layer")); }
@@ -223,6 +262,7 @@ pub struct PRelu<T: Float> {
     pub features: usize,
     pub weight: Tensor<T>,
 }
+pub type Prelu<T> = PRelu<T>;
 
 impl<T: Float> PRelu<T> {
 
@@ -247,4 +287,44 @@ impl<T: Float> PRelu<T> {
     /// No of trainable params
     pub fn param_count(&self) -> usize{ self.features }
 
+}
+
+#[derive(Clone,Debug)]
+pub struct RmsNorm<T: Float> {
+    pub features: usize,
+    pub weight: Tensor<T>,
+    pub epsilon: T,
+}
+pub type RMSNorm<T> = RmsNorm<T>;
+
+impl<T: Float> RmsNorm<T> {
+
+    /// Create a new RMSNorm layer
+    pub fn new(features: usize,epsilon: T,device: Device) -> Result<Self> {
+        if features == 0 || epsilon <= T::zero() { return Err(invalid("RMS norm features and epsilon must be positive")); }
+        Ok(Self {features,weight: Tensor::ones(&[1, features]).to_device(device)?,epsilon})
+    }
+
+    /// Move layer to dev
+    pub fn to_device(&mut self,dev: Device) -> Result<()> {
+        self.weight = self.weight.to_device(dev)?;
+        Ok(())
+    }  
+
+    /// Chaining op to move to dev
+    pub fn with_device(mut self,dev: Device) -> Result<Self> {
+        self.weight = self.weight.to_device(dev)?;
+        Ok(self)
+    }
+
+    /// Set the params[weight]
+    pub fn set_params(&mut self,weight: Tensor<T>) -> Result<()> {
+        if weight.shape() != self.weight.shape() { return Err(invalid("RMS norm weight shape mismatch")); }
+        if weight.device() != self.weight.device() { return Err(invalid("RMS norm weight is on a different device")); }
+        self.weight = weight;
+        Ok(())
+    }
+
+    // No of trainable params 
+    pub fn param_count(&self) -> usize { self.features }
 }

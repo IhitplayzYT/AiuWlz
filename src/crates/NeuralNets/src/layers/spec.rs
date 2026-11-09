@@ -11,6 +11,8 @@ pub struct TokenEmbedding<T: Float> {
     pub embed_dim: usize,
     pub weights: Tensor<T>,
 }
+pub type TokenEmbed<T> = TokenEmbedding<T>;
+pub type TokenEmbedder<T> = TokenEmbedding<T>;
 
 impl<T: Float> TokenEmbedding<T> {
 
