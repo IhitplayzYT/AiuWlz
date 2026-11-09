@@ -55,8 +55,11 @@ impl<T: Float> Sequential<T> {
                 Layer::Dense(x) => return Some(x.output_size()),
                 Layer::Conv1d(x) => return Some(x.out_channels),
                 Layer::Conv2d(x) => return Some(x.out_channels),
+                Layer::ConvTranspose1d(x) => return Some(x.out_channels),
+                Layer::ConvTranspose2d(x) => return Some(x.out_channels),
                 Layer::GlobalAvgPool1d | Layer::GlobalMaxPool1d | Layer::GlobalAvgPool2d | Layer::GlobalMaxPool2d => {}
                 Layer::LayerNorm(x) => return Some(x.features),
+                Layer::RMSNorm(x) => return Some(x.features),
                 Layer::BatchNorm1d(x) => return Some(x.features),
                 Layer::Flatten => return None,
                 _ => {}
@@ -129,7 +132,10 @@ impl<T: Float> Sequential<T> {
                 Layer::Dense(d) => {last_features = Some(d.output_size());break;},
                 Layer::Conv2d(d) => {last_features = Some(d.out_channels);break;},
                 Layer::Conv1d(d) => {last_features = Some(d.out_channels);break;},
+                Layer::ConvTranspose1d(d) => {last_features = Some(d.out_channels);break;},
+                Layer::ConvTranspose2d(d) => {last_features = Some(d.out_channels);break;},
                 Layer::LayerNorm(n) => {last_features = Some(n.features);break;},
+                Layer::RMSNorm(n) => {last_features = Some(n.features);break;},
                 Layer::BatchNorm1d(n) => {last_features = Some(n.features);break;},
                 Layer::PRelu(n) => {last_features = Some(n.features);break;},
                 Layer::Flatten => break,
@@ -145,6 +151,10 @@ impl<T: Float> Sequential<T> {
             if last != next.features { return Err(invalid(format!("Layer norm features {} does not match previous feature size {last}",next.features))); }
         }
 
+        if let (Some(last), Layer::RMSNorm(next)) = (last_features, &layer) {
+            if last != next.features { return Err(invalid(format!("RMS norm features {} does not match previous feature size {last}",next.features))); }
+        }
+
         if let (Some(last), Layer::BatchNorm1d(next)) = (last_features, &layer) {
             if last != next.features { return Err(invalid(format!("Batch norm features {} does not match previous feature size {last}",next.features))); }
         }
@@ -154,6 +164,14 @@ impl<T: Float> Sequential<T> {
         }
 
         if let (Some(last), Layer::Conv2d(next)) = (last_features, &layer) {
+            if last != next.in_channels { return Err(invalid(format!("Convolution channels {} do not match previous feature count {last}",next.in_channels))); }
+        }
+
+        if let (Some(last), Layer::ConvTranspose1d(next)) = (last_features, &layer) {
+            if last != next.in_channels { return Err(invalid(format!("Convolution channels {} do not match previous feature count {last}",next.in_channels))); }
+        }
+
+        if let (Some(last), Layer::ConvTranspose2d(next)) = (last_features, &layer) {
             if last != next.in_channels { return Err(invalid(format!("Convolution channels {} do not match previous feature count {last}",next.in_channels))); }
         }
 
@@ -215,6 +233,32 @@ impl<T: Float> Sequential<T> {
         self.add_layer(Layer::Conv1d(layer))
     }
 
+    // ---------------------------------------------- ConvTranspose2D -----------------------------------------------
+    /// Adds a ConvTranspose2D layer
+    pub fn emplace_conv_transpose2d(&mut self,in_channels: usize,out_channels: usize,kernel: (usize, usize),stride: (usize, usize),padding: (usize, usize),activation: Activation,initializer: Initializer,rng: &mut Rng) -> Result<&mut Self> {
+        self.add_layer(Layer::ConvTranspose2d(ConvTranspose2d::new(in_channels,out_channels,kernel,stride,padding,activation,initializer,rng,self.device)?))
+    }
+    /// Adds a ConvTranspose2D layer
+    pub fn add_conv_transpose2d(&mut self,in_channels: usize,out_channels: usize,kernel: (usize, usize),stride: (usize, usize),padding: (usize, usize)) -> Result<&mut Self> {
+        let mut z = self.rng.clone();
+        self.add_layer(Layer::ConvTranspose2d(ConvTranspose2d::new(in_channels,out_channels,kernel,stride,padding,Activation::Relu,Initializer::KaimingUniform,&mut z,self.device)?))
+    }
+    /// Adds a preinitialised ConvTranspose2D layer
+    pub fn append_conv_transpose2d(&mut self,layer: ConvTranspose2d<T>) -> Result<&mut Self> { self.add_layer(Layer::ConvTranspose2d(layer)) }
+
+    // ---------------------------------------------- ConvTranspose1D -----------------------------------------------
+    /// Adds a ConvTranspose1D layer
+    pub fn emplace_conv_transpose1d(&mut self,in_channels: usize,out_channels: usize,kernel_size: usize,stride: usize,padding: usize,activation: Activation,initializer: Initializer,rng: &mut Rng) -> Result<&mut Self> {
+        self.add_layer(Layer::ConvTranspose1d(ConvTranspose1d::new(in_channels,out_channels,kernel_size,stride,padding,activation,initializer,rng,self.device)?))
+    }
+    /// Adds a ConvTranspose1D layer
+    pub fn add_conv_transpose1d(&mut self,in_channels: usize,out_channels: usize,kernel_size: usize,stride: usize,padding: usize) -> Result<&mut Self> {
+        let mut z = self.rng.clone();
+        self.add_layer(Layer::ConvTranspose1d(ConvTranspose1d::new(in_channels,out_channels,kernel_size,stride,padding,Activation::Relu,Initializer::KaimingUniform,&mut z,self.device)?))
+    }
+    /// Adds a preinitialised ConvTranspose1D layer
+    pub fn append_conv_transpose1d(&mut self,layer: ConvTranspose1d<T>) -> Result<&mut Self> { self.add_layer(Layer::ConvTranspose1d(layer)) }
+
     // ---------------------------------------------- Dropout -----------------------------------------------
     /// Adds a Dropout layer
     pub fn emplace_dropout(&mut self, probability: f64) -> Result<&mut Self> { self.add_layer(Layer::Dropout(Dropout::new(probability)?)) }
@@ -230,6 +274,14 @@ impl<T: Float> Sequential<T> {
     pub fn add_layer_norm(&mut self, features: usize) -> Result<&mut Self> { self.add_layer(Layer::LayerNorm(LayerNorm::new(features,T::from_f32(1e-5),self.device)?)) }
     /// Adds a preinitialised LayerNorm layer
     pub fn append_layer_norm(&mut self,layer: LayerNorm<T>) -> Result<&mut Self> { self.add_layer(Layer::LayerNorm(layer)) }
+
+    // ---------------------------------------------- RMSNorm -----------------------------------------------
+    /// Adds a RMSNorm layer
+    pub fn emplace_rms_norm(&mut self,features: usize,epsilon: T) -> Result<&mut Self> { self.add_layer(Layer::RMSNorm(RMSNorm::new(features,epsilon,self.device)?)) }
+    /// Adds a RMSNorm layer with eps = 1e-5
+    pub fn add_rms_norm(&mut self,features: usize) -> Result<&mut Self> { self.add_layer(Layer::RMSNorm(RMSNorm::new(features,T::from_f32(1e-5),self.device)?)) }
+    /// Adds a preinitialised RMSNorm layer
+    pub fn append_rms_norm(&mut self,layer: RMSNorm<T>) -> Result<&mut Self> { self.add_layer(Layer::RMSNorm(layer)) }
 
     // ---------------------------------------------- LayerNorm -----------------------------------------------
     /// Adds a BatchNorm1D layer
@@ -263,6 +315,23 @@ impl<T: Float> Sequential<T> {
     pub fn add_flatten(&mut self) -> Result<&mut Self> { self.add_layer(Layer::Flatten) }
     /// Adds a Flatten layer
     pub fn append_flatten(&mut self) -> Result<&mut Self> { self.add_layer(Layer::Flatten) }
+
+    // ---------------------------------------------- Identity -----------------------------------------------
+    /// Adds a Identity layer
+    pub fn emplace_identity(&mut self) -> Result<&mut Self> { self.add_layer(Layer::Identity(Identity::new())) }
+    /// Adds a Identity layer
+    pub fn add_identity(&mut self) -> Result<&mut Self> { self.add_layer(Layer::Identity(Identity::new())) }
+    /// Adds a preinitilised Identity layer
+    pub fn append_identity(&mut self,layer: Identity) -> Result<&mut Self> { self.add_layer(Layer::Identity(layer)) }
+
+
+    // ---------------------------------------------- Unflatten -----------------------------------------------
+    /// Adds a Unflatten layer
+    pub fn emplace_unflatten(&mut self,dim: isize,unflattened_size: Vec<usize>) -> Result<&mut Self> { self.add_layer(Layer::Unflatten(Unflatten::new(dim,unflattened_size)?)) }
+    /// Adds a Unflatten layer
+    pub fn add_unflatten(&mut self,dim: isize,unflattened_size: Vec<usize>) -> Result<&mut Self> { self.add_layer(Layer::Unflatten(Unflatten::new(dim,unflattened_size)?)) }
+    /// Adds a preintialised Unflatten layer
+    pub fn append_unflatten(&mut self,layer: Unflatten) -> Result<&mut Self> { self.add_layer(Layer::Unflatten(layer)) }
 
     // ---------------------------------------------- GlobalAvgPool2D -----------------------------------------------
     /// Adds a GlobalAvgPool2D layer
@@ -329,6 +398,38 @@ impl<T: Float> Sequential<T> {
     /// Adds a preinitialised AvgPool2D layer
     pub fn append_avg_pool2d(&mut self,layer: AvgPool2d) -> Result<&mut Self> { self.add_layer(Layer::AvgPool2d(layer)) }
 
+    // ---------------------------------------------- AdaptiveMaxPool1D -----------------------------------------------
+    /// Adds an AdaptiveMaxPool1D layer
+    pub fn emplace_adaptive_max_pool1d(&mut self,output_size: usize) -> Result<&mut Self> { self.add_layer(Layer::AdaptiveMaxPool1d(AdaptiveMaxPool1d::new(output_size)?)) }
+    /// Adds an AdaptiveMaxPool1D layer
+    pub fn add_adaptive_max_pool1d(&mut self,output_size: usize) -> Result<&mut Self> { self.add_layer(Layer::AdaptiveMaxPool1d(AdaptiveMaxPool1d::new(output_size)?)) }
+    /// Adds a preinitialised AdaptiveMaxPool1D layer
+    pub fn append_adaptive_max_pool1d(&mut self,layer: AdaptiveMaxPool1d) -> Result<&mut Self> { self.add_layer(Layer::AdaptiveMaxPool1d(layer)) }
+
+    // ---------------------------------------------- AdaptiveAvgPool1D -----------------------------------------------
+    /// Adds an AdaptiveAvgPool1D layer
+    pub fn emplace_adaptive_avg_pool1d(&mut self,output_size: usize) -> Result<&mut Self> { self.add_layer(Layer::AdaptiveAvgPool1d(AdaptiveAvgPool1d::new(output_size)?)) }
+    /// Adds an AdaptiveAvgPool1D layer
+    pub fn add_adaptive_avg_pool1d(&mut self,output_size: usize) -> Result<&mut Self> { self.add_layer(Layer::AdaptiveAvgPool1d(AdaptiveAvgPool1d::new(output_size)?)) }
+    /// Adds a preinitialised AdaptiveAvgPool1D layer
+    pub fn append_adaptive_avg_pool1d(&mut self,layer: AdaptiveAvgPool1d) -> Result<&mut Self> { self.add_layer(Layer::AdaptiveAvgPool1d(layer)) }
+
+    // ---------------------------------------------- AdaptiveMaxPool2D -----------------------------------------------
+    /// Adds an AdaptiveMaxPool2D layer
+    pub fn emplace_adaptive_max_pool2d(&mut self,output_size: (usize,usize)) -> Result<&mut Self> { self.add_layer(Layer::AdaptiveMaxPool2d(AdaptiveMaxPool2d::new(output_size)?)) }
+    /// Adds an AdaptiveMaxPool2D layer
+    pub fn add_adaptive_max_pool2d(&mut self,output_size: (usize,usize)) -> Result<&mut Self> { self.add_layer(Layer::AdaptiveMaxPool2d(AdaptiveMaxPool2d::new(output_size)?)) }
+    /// Adds a preinitialised AdaptiveMaxPool2D layer
+    pub fn append_adaptive_max_pool2d(&mut self,layer: AdaptiveMaxPool2d) -> Result<&mut Self> { self.add_layer(Layer::AdaptiveMaxPool2d(layer)) }
+
+    // ---------------------------------------------- AdaptiveAvgPool2D -----------------------------------------------
+    /// Adds an AdaptiveAvgPool2D layer
+    pub fn emplace_adaptive_avg_pool2d(&mut self,output_size: (usize,usize)) -> Result<&mut Self> { self.add_layer(Layer::AdaptiveAvgPool2d(AdaptiveAvgPool2d::new(output_size)?)) }
+    /// Adds an AdaptiveAvgPool2D layer
+    pub fn add_adaptive_avg_pool2d(&mut self,output_size: (usize,usize)) -> Result<&mut Self> { self.add_layer(Layer::AdaptiveAvgPool2d(AdaptiveAvgPool2d::new(output_size)?)) }
+    /// Adds a preinitialised AdaptiveAvgPool2D layer
+    pub fn append_adaptive_avg_pool2d(&mut self,layer: AdaptiveAvgPool2d) -> Result<&mut Self> { self.add_layer(Layer::AdaptiveAvgPool2d(layer)) }
+
 
     // ---------------------------------------------- Residual -----------------------------------------------
     /// Adds a Residual layer
@@ -337,6 +438,111 @@ impl<T: Float> Sequential<T> {
     pub fn add_residual(&mut self, layers: Vec<Layer<T>>) -> Result<&mut Self> { self.add_layer(Layer::Residual(Box::new(ResidualBlock::new(layers)?))) }
     /// Adds a preinitialised Residual layer
     pub fn append_residual(&mut self, layer: ResidualBlock<T>) -> Result<&mut Self> { self.add_layer(Layer::Residual(Box::new(layer))) }
+
+    /// Inference fwd
+    /// Dropout layer is disabled and layernorm use running stats 
+    pub fn forward(&self, input: &Tensor<T>) -> Result<Tensor<T>> {
+        self.validate_input(input)?;
+        let mut value = input.clone();
+        for layer in &self.layers { value = layer.forward(&value)?; }
+        Ok(value)
+    }
+
+    /// Same as forward
+    pub fn predict(&self, input: &Tensor<T>) -> Result<Tensor<T>> { self.forward(input) }
+
+    /// Predict the class
+    pub fn predict_classes(&self, input: &Tensor<T>) -> Result<Tensor<i32>> {
+        if self.output_size().unwrap_or(0) < 2 {return Err(invalid("predict_classes require at least 2 outputs"));}
+        Ok(self.forward(input)?.argmax(-1, false)?)
+    }
+
+    /// Returns the accuracy of predictions of the network for the input
+    pub fn accuracy(&self, input: &Tensor<T>, target: &Tensor<T>) -> Result<f64> {
+        let pred = self.predict_classes(input)?;
+        let exp = target.argmax(-1, false)?;
+        Ok(pred.eq_t(&exp)?.sum_all()? as f64 / input.shape()[0] as f64)
+    }
+
+    /// Run a batch of integer token sequences with embedding.
+    pub fn forward_tokens(&self, token_ids: &Tensor<i32>) -> Result<Tensor<T>> {
+        let embedding = self.embedding.as_ref().ok_or_else(|| invalid("No embedding layer found"))?;
+        if token_ids.ndim() != 2 || token_ids.shape()[0] == 0 || token_ids.shape()[1] == 0 { return Err(invalid("Token input must have shape [batch, sequence] with non zero dims")); }
+        if token_ids.device() != self.device { return Err(invalid("Token id and model params must be on same dev")); }
+        // each batch can contain a sequence of token ids
+        let (batch,seq) = (token_ids.shape()[0],token_ids.shape()[1]);
+        let embedded = embedding.forward(token_ids)?.reshape(&[(batch * seq) as isize,embedding.embed_dim as isize])?; // Make proper sized lookup table for each token
+        let output = if self.layers.is_empty() { embedded } else {self.forward(&embedded)? };
+        let mut shape = vec![batch as isize, seq as isize];
+        shape.extend(output.shape()[1..].iter().map(|&d| d as isize));
+        // Reshape into the [batch,seq,...] shape
+        output.reshape(&shape).map_err(Into::into)
+    }
+
+    /// Same as forward_tokens
+    pub fn predict_tokens(&self, token_ids: &Tensor<i32>) -> Result<Tensor<T>> { self.forward_tokens(token_ids) }
+
+    /// Forward, autograd backward, then optim update for one mini-batch.
+    pub fn train_on_batch(&mut self,input: &Tensor<T>,target: &Tensor<T>,loss: Loss,optim: &mut Optimizer<T>) -> Result<T> {
+        self.validate_dataset_pair(input, target)?;
+        self.train_graph_on_batch(Comp::constant(input.clone()),target,loss,optim,Vec::new())
+    }
+
+    /// Train 1 batch of token id with shape [batch, sequence, ...] or preflattened [batch * sequence, ...]
+    pub fn train_tokens_on_batch(&mut self,token_ids: &Tensor<i32>,target: &Tensor<T>,loss: Loss,optim: &mut Optimizer<T>) -> Result<T> {
+        let embedding = self.embedding.as_ref().ok_or_else(|| invalid("No embedding layer found"))?;
+        if token_ids.ndim() != 2 || token_ids.shape()[0] == 0 || token_ids.shape()[1] == 0 { return Err(invalid("Input must have shape: [batch, sequence] with non zero dims")); }
+        if token_ids.device() != self.device { return Err(invalid("Token id and model have to be on same device")); }
+        if token_ids.device() != embedding.weights.device() { return Err(invalid("Token ids and embedding weight have to be on same device")); }
+        let (batch, seq) = (token_ids.shape()[0], token_ids.shape()[1]);
+        let indices = validate_token_indices(token_ids, embedding.vocab_sz)?;
+        let weights = embedding.weights.clone();
+        let embed_dim = embedding.embed_dim;
+        let pfx = [batch, seq];
+        let target = if target.shape().starts_with(&pfx) {
+            let mut flat_shape = vec![(batch * seq) as isize];
+            flat_shape.extend(target.shape()[2..].iter().map(|&d| d as isize));
+            target.reshape(&flat_shape)?
+        } else if target.shape().first() == Some(&(batch * seq)) { target.clone() } else { return Err(invalid("Targets must start with [batch, seq] or flattened token count [batch * seq,...]")); };
+        target.same_device(&weights)?;
+        let embedding_node = Comp::leaf(weights);
+        let graph = embedding_node.index_select(0, &indices)?.reshape(&[(batch * seq) as isize, embed_dim as isize])?;
+        self.train_graph_on_batch(graph, &target, loss, optim, vec![embedding_node])
+    }
+
+    pub fn train_graph_on_batch(&mut self,mut graph: Comp<T>,target: &Tensor<T>,loss: Loss,optim: &mut Optimizer<T>,mut param_comps: Vec<Comp<T>>) -> Result<T> {
+        for layer in &mut self.layers {
+            let (next, params) = layer.forward_graph(&graph, true, &mut self.rng)?;
+            graph = next;
+            param_comps.extend(params);
+        }
+        let loss_node = loss_comp(&graph, target, loss)?;
+        let loss_data = loss_node.item()?;
+        loss_node.backward()?;
+        let mut grads = Vec::with_capacity(param_comps.len());
+        for node in param_comps{ grads.push(node.grad().ok_or_else(|| invalid("autograd did not produce a parameter gradient"))?); }
+        let mut params = self.params();
+        optim.update(&mut params, &grads)?;
+        self.set_parameters(&params)?;
+        Ok(loss_data)
+    }
+
+
+    /// Validates if input is proper to the sequential api
+    pub fn validate_input(&self, input: &Tensor<T>) -> Result<()> {
+        if self.layers.is_empty() { return Err(invalid("Network is empty")); }
+        if input.ndim() < 2 || input.shape()[0] == 0 { return Err(invalid("Network must have batch and one param dim atleast")); }
+        if input.device() != self.device { return Err(invalid(format!("Input on {}, but model is on {}",input.device(),self.device))); }
+        Ok(())
+    }
+
+    /// Validates input and target pair
+    pub fn validate_dataset_pair(&self, input: &Tensor<T>, target: &Tensor<T>) -> Result<()> {
+        self.validate_input(input)?;
+        if target.shape().first() != input.shape().first() { return Err(invalid("No of samples/batches isnt same for input and target")); }
+        input.same_device(target)?;
+        Ok(())
+    }
 
 
 }

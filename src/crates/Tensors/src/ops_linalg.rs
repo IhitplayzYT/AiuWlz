@@ -49,6 +49,97 @@ impl<T: Element> Tensor<T> {
         })
     }
 
+    // Used AI to generate
+    pub fn conv_transpose2d(&self,weight: &Self,stride: (usize, usize),padding: (usize, usize)) -> TensorResult<Self> {
+        self.same_device(weight)?;
+        if self.ndim() != 4 || weight.ndim() != 4 || stride.0 == 0 || stride.1 == 0 { return Err(TensorError::InvalidShape("ConvTranspose2d expects NCHW input, IOHW weights, and positive strides".into())); }
+        let (n,ic,h,w) = (self.shape()[0],self.shape()[1],self.shape()[2],self.shape()[3]);
+        let (wc,oc,kh,kw) = (weight.shape()[0],weight.shape()[1],weight.shape()[2],weight.shape()[3]);
+        if ic != wc || h == 0 || w == 0 || kh == 0 || kw == 0 { return Err(TensorError::ShapeMismatch {op: "ConvTranspose2d channels",lhs: self.shape().to_vec(),rhs: weight.shape().to_vec()}); }
+        let oh = (h - 1) * stride.0 + kh;
+        let ow = (w - 1) * stride.1 + kw;
+        if 2 * padding.0 >= oh || 2 * padding.1 >= ow { return Err(TensorError::InvalidShape("ConvTranspose2d padding removes the output".into())); }
+        let (oh,ow) = (oh - 2 * padding.0,ow - 2 * padding.1);
+        self.via_host(|x| {
+            let xv = x.compact()?.to_vec()?;
+            let wv = weight.cpu()?.compact()?.to_vec()?;
+            let out = par::map_range(n * oc * oh * ow, |q| {
+                let ox = q % ow;
+                let oy = q / ow % oh;
+                let out_c = q / (ow * oh) % oc;
+                let batch = q / (ow * oh * oc);
+                let mut sum = T::zero();
+                for in_c in 0..ic { for ky in 0..kh {
+                    let iy_num = oy as isize + padding.0 as isize - ky as isize;
+                    if iy_num < 0 || iy_num as usize % stride.0 != 0 { continue; }
+                    let iy = iy_num as usize / stride.0;
+                    if iy >= h { continue; }
+                    for kx in 0..kw {
+                        let ix_num = ox as isize + padding.1 as isize - kx as isize;
+                        if ix_num < 0 || ix_num as usize % stride.1 != 0 { continue; }
+                        let ix = ix_num as usize / stride.1;
+                        if ix < w { sum += xv[((batch * ic + in_c) * h + iy) * w + ix] * wv[((in_c * oc + out_c) * kh + ky) * kw + kx]; }
+                    }
+                }}
+                sum
+            });
+            Tensor::from_vec(out,&[n,oc,oh,ow])
+        })
+    }
+
+    // Used AI to generate
+    pub fn conv_transpose2d_backward(&self,weight: &Self,output_gradient: &Self,stride: (usize, usize),padding: (usize, usize)) -> TensorResult<(Self,Self,Self)> {
+        self.same_device(weight)?;
+        self.same_device(output_gradient)?;
+        if self.ndim() != 4 || weight.ndim() != 4 || output_gradient.ndim() != 4 || stride.0 == 0 || stride.1 == 0 { return Err(TensorError::InvalidShape("ConvTranspose2d backward expects rank 4 tensors and positive strides".into())); }
+        let (n,ic,h,w) = (self.shape()[0],self.shape()[1],self.shape()[2],self.shape()[3]);
+        let (wc,oc,kh,kw) = (weight.shape()[0],weight.shape()[1],weight.shape()[2],weight.shape()[3]);
+        if h == 0 || w == 0 || kh == 0 || kw == 0 { return Err(TensorError::InvalidShape("ConvTranspose2d backward expects nonempty spatial dimensions".into())); }
+        let (oh,ow) = ((h - 1) * stride.0 + kh - 2 * padding.0,(w - 1) * stride.1 + kw - 2 * padding.1);
+        if ic != wc || output_gradient.shape() != [n,oc,oh,ow] { return Err(TensorError::ShapeMismatch {op: "ConvTranspose2d backward gradient",lhs: vec![n,oc,oh,ow],rhs: output_gradient.shape().to_vec()}); }
+        let xv = self.cpu()?.compact()?.to_vec()?;
+        let wv = weight.cpu()?.compact()?.to_vec()?;
+        let gv = output_gradient.cpu()?.compact()?.to_vec()?;
+        let dx = par::map_range(n * ic * h * w, |flat| {
+            let ix = flat % w;
+            let iy = flat / w % h;
+            let in_c = flat / (w * h) % ic;
+            let batch = flat / (w * h * ic);
+            let mut sum = T::zero();
+            for out_c in 0..oc { for ky in 0..kh {
+                let oy = iy as isize * stride.0 as isize - padding.0 as isize + ky as isize;
+                if oy < 0 || oy >= oh as isize { continue; }
+                for kx in 0..kw {
+                    let ox = ix as isize * stride.1 as isize - padding.1 as isize + kx as isize;
+                    if ox >= 0 && ox < ow as isize { sum += gv[((batch * oc + out_c) * oh + oy as usize) * ow + ox as usize] * wv[((in_c * oc + out_c) * kh + ky) * kw + kx]; }
+                }
+            }}
+            sum
+        });
+        let dw = par::map_range(ic * oc * kh * kw, |flat| {
+            let kx = flat % kw;
+            let ky = flat / kw % kh;
+            let out_c = flat / (kw * kh) % oc;
+            let in_c = flat / (kw * kh * oc);
+            let mut sum = T::zero();
+            for batch in 0..n { for iy in 0..h {
+                let oy = iy as isize * stride.0 as isize - padding.0 as isize + ky as isize;
+                if oy < 0 || oy >= oh as isize { continue; }
+                for ix in 0..w {
+                    let ox = ix as isize * stride.1 as isize - padding.1 as isize + kx as isize;
+                    if ox >= 0 && ox < ow as isize { sum += xv[((batch * ic + in_c) * h + iy) * w + ix] * gv[((batch * oc + out_c) * oh + oy as usize) * ow + ox as usize]; }
+                }
+            }}
+            sum
+        });
+        let db = par::map_range(oc, |out_c| {
+            let mut sum = T::zero();
+            for batch in 0..n { for oy in 0..oh { for ox in 0..ow { sum += gv[((batch * oc + out_c) * oh + oy) * ow + ox]; }}}
+            sum
+        });
+        Ok((Self::from_vec(dx,&[n,ic,h,w])?.to_device(self.device())?,Self::from_vec(dw,&[ic,oc,kh,kw])?.to_device(self.device())?,Self::from_vec(db,&[1,oc,1,1])?.to_device(self.device())?))
+    }
+
     /// Return grads for input, OIHW filters
     // Completely generated by AI
     pub fn conv2d_backward(&self, weight: &Self, output_gradient: &Self, stride: (usize, usize), padding: (usize, usize)) -> TensorResult<(Self, Self, Self)> {

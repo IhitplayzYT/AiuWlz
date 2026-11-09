@@ -24,10 +24,17 @@ impl<T: Element> Tensor<T> {
         Tensor { storage: Arc::new(storage), layout }
     }
 
+
     /// Build a Tensor from 1d Vec
     pub fn from_1d(data: Vec<T>) -> Result<Self>{
         let l = data.len();
         Ok(Self::from_comp(Storage::Cpu(data), Layout::contiguous(&[l])))
+    }
+
+    /// Makes a NULL tensor
+    /// !Warning: This tensor isnt safe to do operations on
+    pub fn NULL() -> Result<Self>{
+        Ok(Self::from_comp(Storage::Cpu(vec![]), Layout::contiguous(&[0])))        
     }
 
 

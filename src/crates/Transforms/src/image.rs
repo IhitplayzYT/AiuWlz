@@ -1,3 +1,4 @@
+use image::imageops::GaussianBlurParameters;
 use ::image::{DynamicImage, GenericImageView, imageops::FilterType};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ImageTransform {
@@ -10,7 +11,9 @@ pub enum ImageTransform {
     FlipHorizontal,
     FlipVertical,
     Grayscale,
+    HueRotate{degree: i32},
     Invert,
+    Unsharpen{sigma:f32,threshold:i32},
     Blur {sigma: f32},
     Brightness {amount: i32},
     Contrast {amount: f32},
@@ -43,7 +46,8 @@ pub fn apply(image: &DynamicImage, transform: &ImageTransform) -> Result<Dynamic
         ImageTransform::Resize {width,height,filter} => {
             if width == 0 || height == 0 { return Err("Resize dims must be non zero".into()); }
             Ok(image.resize_exact(width, height, filter.into()))
-        }
+        },
+        ImageTransform::Unsharpen { sigma, threshold } => Ok(image.unsharpen(sigma, threshold)),
         ImageTransform::Crop {x,y,width: crop_width,height: crop_height} => {
             validate_crop(x, y, crop_width, crop_height, width, height)?;
             Ok(image.crop_imm(x, y, crop_width, crop_height))
@@ -53,7 +57,9 @@ pub fn apply(image: &DynamicImage, transform: &ImageTransform) -> Result<Dynamic
             let x = (width - crop_width) / 2;
             let y = (height - crop_height) / 2;
             Ok(image.crop_imm(x, y, crop_width, crop_height))
-        }
+        },
+        ImageTransform::HueRotate { degree } => Ok(image.huerotate(degree)),
+
         ImageTransform::Rotate90 => Ok(image.rotate90()),
         ImageTransform::Rotate180 => Ok(image.rotate180()),
         ImageTransform::Rotate270 => Ok(image.rotate270()),

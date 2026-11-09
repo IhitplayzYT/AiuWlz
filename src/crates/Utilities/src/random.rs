@@ -3,6 +3,7 @@ pub mod Random{
 
     use std::f64::consts::PI;
 
+    #[derive(Debug,Clone)]
     pub struct Rng {
         s: [u64; 4],
     }
