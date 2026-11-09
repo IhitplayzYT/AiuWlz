@@ -8,6 +8,7 @@ pub(crate) fn invalid(message: impl Into<String>) -> TensorError {
 /// Elementwise activation
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Activation {
+    None,
     Linear,
     Relu,
     LeakyRelu(f64),

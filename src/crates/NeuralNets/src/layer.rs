@@ -1,6 +1,6 @@
 use Tensors::{autograd::Comp, dtype::Float, tensor::Tensor};
 use Utilities::random::Random::Rng;
-use crate::{common::{Activation, Initializer, Result, flatten, invalid, validate_activation, validate_feature_input}, layers::{basic::{BatchNorm1d, Dense, Dropout, LayerNorm, PRelu, ResidualBlock}, cnn::{AvgPool1d, AvgPool2d, Conv1d, Conv2d, MaxPool1d, MaxPool2d, validate_conv1d_input}}};
+use crate::{common::{Activation, Initializer, Result, flatten, invalid, validate_activation, validate_feature_input}, layers::{basic::{BatchNorm1d, Dense, Dropout, Identity, LayerNorm, PRelu, RMSNorm, ResidualBlock, Unflatten}, cnn::{AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d, AvgPool2d, Conv1d, Conv2d, ConvTranspose1d, ConvTranspose2d, MaxPool1d, MaxPool2d, validate_conv1d_input}}};
 
 /// Layer Wrapper using for NN
 #[derive(Clone,Debug)]
@@ -8,17 +8,26 @@ pub enum Layer<T: Float> {
     Dense(Dense<T>),
     Conv1d(Conv1d<T>),
     Conv2d(Conv2d<T>),
+    ConvTranspose1d(ConvTranspose1d<T>),
+    ConvTranspose2d(ConvTranspose2d<T>),
     Dropout(Dropout),
+    Identity(Identity),
+    Unflatten(Unflatten),
     LayerNorm(LayerNorm<T>),
+    RMSNorm(RMSNorm<T>),
     BatchNorm1d(BatchNorm1d<T>),
     PRelu(PRelu<T>),
     Residual(Box<ResidualBlock<T>>),
+    Activation(Activation),
+    Flatten,
     MaxPool2d(MaxPool2d),
     AvgPool2d(AvgPool2d),
     MaxPool1d(MaxPool1d),
     AvgPool1d(AvgPool1d),
-    Activation(Activation),
-    Flatten,
+    AdaptiveMaxPool1d(AdaptiveMaxPool1d),
+    AdaptiveAvgPool1d(AdaptiveAvgPool1d),
+    AdaptiveMaxPool2d(AdaptiveMaxPool2d),
+    AdaptiveAvgPool2d(AdaptiveAvgPool2d),
     GlobalAvgPool1d,
     GlobalMaxPool1d,
     GlobalAvgPool2d,
@@ -33,7 +42,10 @@ impl<T: Float> Layer<T> {
             Self::Dense(x) => vec![x.weights.clone(), x.bias.clone()],
             Self::Conv1d(x) => vec![x.weights.clone(), x.bias.clone()],
             Self::Conv2d(x) => vec![x.weights.clone(), x.bias.clone()],
+            Self::ConvTranspose1d(x) => vec![x.weights.clone(), x.bias.clone()],
+            Self::ConvTranspose2d(x) => vec![x.weights.clone(), x.bias.clone()],
             Self::LayerNorm(x) => vec![x.weight.clone(), x.bias.clone()],
+            Self::RMSNorm(x) => vec![x.weight.clone()],
             Self::BatchNorm1d(x) => vec![x.weight.clone(), x.bias.clone()],
             Self::PRelu(x) => vec![x.weight.clone()],
             Self::Residual(x) => x.layers.iter().flat_map(Layer::params).collect(),
@@ -57,10 +69,13 @@ impl<T: Float> Layer<T> {
             Layer::Conv2d(x) => *cnt += x.param_count(),
             Layer::Dense(x) => *cnt += x.param_count(),
             Layer::Dropout(x) => *cnt += x.param_count(),
-            Layer::Activation(_) | Layer::Flatten | Layer::GlobalAvgPool1d | Layer::GlobalAvgPool2d | Layer::GlobalMaxPool1d | Layer::GlobalMaxPool2d | Layer::MaxPool1d(_) | Layer::MaxPool2d(_)=> *cnt += 0,
+            Layer::Activation(_) | Layer::Flatten | Layer::Identity(_) | Layer::Unflatten(_) | Layer::AdaptiveAvgPool1d(_) | Layer::AdaptiveAvgPool2d(_) | Layer::AdaptiveMaxPool1d(_) | Layer::AdaptiveMaxPool2d(_) | Layer::GlobalAvgPool1d | Layer::GlobalAvgPool2d | Layer::GlobalMaxPool1d | Layer::GlobalMaxPool2d | Layer::MaxPool1d(_) | Layer::MaxPool2d(_)=> *cnt += 0,
             Layer::LayerNorm(x) => *cnt += x.param_count(),
             Layer::PRelu(x) => *cnt += x.param_count(),
             Layer::Residual(x) => x.layers.iter().for_each(|x| x._param_cnt_helper(cnt)),
+            Layer::ConvTranspose1d(x) => *cnt += x.param_count(),
+            Layer::ConvTranspose2d(x) => *cnt += x.param_count(),
+            Layer::RMSNorm(x) => *cnt += x.param_count(),
         };
     }
 
@@ -73,7 +88,15 @@ impl<T: Float> Layer<T> {
             }
             Self::Conv1d(layer) => layer.set_parameters(params),
             Self::Conv2d(layer) => layer.set_parameters(params),
+            Self::ConvTranspose1d(layer) => layer.set_parameters(params),
+            Self::ConvTranspose2d(layer) => layer.set_parameters(params),
             Self::LayerNorm(layer) => set_wt_b(&mut layer.weight, &mut layer.bias, params),
+            Self::RMSNorm(layer) => {
+                if params.len() != 1 || params[0].shape() != layer.weight.shape() { return Err(invalid("RMS norm params shape mismatch")); }
+                if params[0].device() != layer.weight.device() { return Err(invalid("RMSnorm layer requires weight on same device")); }
+                layer.weight = params[0].clone();
+                Ok(())
+            },
             Self::BatchNorm1d(layer) => set_wt_b(&mut layer.weight, &mut layer.bias, params),
             Self::PRelu(layer) => {
                 if params.len() != 1 || params[0].shape() != layer.weight.shape() { return Err(invalid("Prelu shape mismatch")); }
@@ -104,8 +127,12 @@ impl<T: Float> Layer<T> {
     pub fn output_size(&self, input_features: Option<usize>) -> Option<usize> {
         match self {
             Self::Dense(x) => Some(x.output_size()),
+            Self::Conv1d(x) => Some(x.out_channels),
             Self::Conv2d(x) => Some(x.out_channels),
+            Self::ConvTranspose1d(x) => Some(x.out_channels),
+            Self::ConvTranspose2d(x) => Some(x.out_channels),
             Self::LayerNorm(x) => Some(x.features),
+            Self::RMSNorm(x) => Some(x.features),
             Self::BatchNorm1d(x) => Some(x.features),
             Self::PRelu(x) => Some(x.features),
             Self::Flatten => None,
@@ -119,6 +146,10 @@ impl<T: Float> Layer<T> {
             Self::Dense(layer) => layer.forward(input),
             Self::Conv1d(layer) => layer.forward(input),
             Self::Conv2d(layer) => layer.forward(input),
+            Self::ConvTranspose1d(layer) => layer.forward(input),
+            Self::ConvTranspose2d(layer) => layer.forward(input),
+            Self::Identity(_) => Ok(input.clone()),
+            Self::Unflatten(layer) => unflatten(input,layer),
             Self::Dropout(_) => Ok(input.clone()),
             Self::BatchNorm1d(layer) => {
                 if input.ndim() != 2 { return Err(invalid("Batch norm expects [batch, features] input")); }
@@ -130,6 +161,11 @@ impl<T: Float> Layer<T> {
                 validate_feature_input(input, layer.features, "layer norm")?;
                 // ((x - mu)/sigma) * w + b
                 input.layer_norm(layer.epsilon)?.mul(&layer.weight)?.add(&layer.bias).map_err(Into::into)
+            },
+            Self::RMSNorm(layer) => {
+                validate_feature_input(input,layer.features,"RMS norm")?;
+                //  w * (x / ( sqrt(mean(x^2) + eps)))
+                input.div(&input.square()?.mean(-1,true)?.add_scalar(layer.epsilon)?.sqrt()?)?.mul(&layer.weight).map_err(Into::into)
             },
             Self::Activation(activation) => activate_tensor(input, *activation),
             Self::PRelu(layer) => {
@@ -154,6 +190,10 @@ impl<T: Float> Layer<T> {
                 if input.ndim() != 3 { return Err(invalid("AvgPool1d expects [batch, channels, length] input")); }
                 input.unsqueeze(2)?.avg_pool2d((1, layer.kernel_size),(1, layer.stride),(0, layer.padding),layer.count_pad,)?.squeeze(2).map_err(Into::into)
             }
+            Self::AdaptiveMaxPool1d(layer) => adaptive_pool1d(input,layer.output_size,true),
+            Self::AdaptiveAvgPool1d(layer) => adaptive_pool1d(input,layer.output_size,false),
+            Self::AdaptiveMaxPool2d(layer) => adaptive_pool2d(input,layer.output_size,true),
+            Self::AdaptiveAvgPool2d(layer) => adaptive_pool2d(input,layer.output_size,false),
             Self::GlobalAvgPool2d => {
                 if input.ndim() != 4 {return Err(invalid("GlobalAvgPool2D expects NCHW 4 rank input"));}
                 input.mean(3, true)?.mean(2, true).map_err(Into::into)
@@ -222,6 +262,39 @@ impl<T: Float> Layer<T> {
                 );
                 Ok((apply_activation(&conv, layer.activation)?, vec![w, b]))
             },
+            Self::ConvTranspose2d(layer) => {
+                let x = input.data();
+                if x.ndim() != 4 || x.shape()[1] != layer.in_channels { return Err(invalid(format!("ConvTranspose2d expects [batch, {}, height, width], got {:?}",layer.in_channels,x.shape()))); }
+                let w = Comp::leaf(layer.weights.clone());
+                let b = Comp::leaf(layer.bias.clone());
+                let x_data = x.clone();
+                let w_data = w.data();
+                let grad = x_data.conv_transpose2d(&w_data,layer.stride,layer.padding)?.add(&b.data())?;
+                let (stride,padding) = (layer.stride,layer.padding);
+                let conv = Comp::from_op(grad,vec![input.clone(),w.clone(),b.clone()],move |g| {
+                    let (dx,dw,db) = x_data.conv_transpose2d_backward(&w_data,g,stride,padding)?;
+                    Ok(vec![Some(dx),Some(dw),Some(db)])
+                });
+                Ok((apply_activation(&conv,layer.activation)?,vec![w,b]))
+            },
+            Self::ConvTranspose1d(layer) => {
+                let x = input.data();
+                validate_conv1d_input(&x,layer.in_channels)?;
+                let x2d = input.unsqueeze(2)?;
+                let w = Comp::leaf(layer.weights.clone());
+                let b = Comp::leaf(layer.bias.clone());
+                let w2d = w.unsqueeze(2)?;
+                let b2d = b.reshape(&[1,layer.out_channels as isize,1,1])?;
+                let x_data = x2d.data();
+                let w_data = w2d.data();
+                let grad = x_data.conv_transpose2d(&w_data,(1,layer.stride),(0,layer.padding))?.add(&b2d.data())?;
+                let (stride,padding) = ((1,layer.stride),(0,layer.padding));
+                let conv = Comp::from_op(grad,vec![x2d.clone(),w2d.clone(),b2d.clone()],move |g| {
+                    let (dx,dw,db) = x_data.conv_transpose2d_backward(&w_data,g,stride,padding)?;
+                    Ok(vec![Some(dx),Some(dw),Some(db)])
+                });
+                Ok((apply_activation(&conv.squeeze(2)?,layer.activation)?,vec![w,b]))
+            },
             Self::Dropout(layer) => {
                 if !training || layer.probability == 0.0 { return Ok((input.clone(), Vec::new())); }
                 let data = input.data();
@@ -236,6 +309,11 @@ impl<T: Float> Layer<T> {
                 let w = Comp::leaf(layer.weight.clone());
                 let b = Comp::leaf(layer.bias.clone());
                 Ok(( input.layer_norm(layer.epsilon)?.mul(&w)?.add(&b)?, vec![w, b]))
+            },
+            Self::RMSNorm(layer) => {
+                validate_feature_input(&input.data(),layer.features,"RMS norm")?;
+                let w = Comp::leaf(layer.weight.clone());
+                Ok((input.div(&input.square()?.mean(-1,true)?.add_scalar(layer.epsilon)?.sqrt()?)?.mul(&w)?,vec![w]))
             },
             Self::BatchNorm1d(layer) => {
                 let x = input.data();
@@ -319,6 +397,8 @@ impl<T: Float> Layer<T> {
             },
             Self::Activation(activation) => Ok((apply_activation(input, *activation)?, Vec::new())),
             Self::Flatten => Ok((input.reshape(&[input.shape()[0] as isize, -1])?, Vec::new())),
+            Self::Identity(_) => Ok((input.clone(),Vec::new())),
+            Self::Unflatten(layer) => Ok((unflatten_comp(input,layer)?,Vec::new())),
             Self::GlobalAvgPool2d => {
                 if input.ndim() != 4 { return Err(invalid("GlobalAvgPool2D expects NCHW 4 rank input")); }
                 Ok((input.mean(3, true)?.mean(2, true)?, Vec::new()))
@@ -331,6 +411,10 @@ impl<T: Float> Layer<T> {
                 if input.ndim() != 3 { return Err(invalid("GlobalAvgPool1D expects [batch, channels, length]")); }
                 Ok((input.mean(2, true)?, Vec::new()))
             },
+            Self::AdaptiveMaxPool1d(layer) => Ok((adaptive_pool1d_comp(input,layer.output_size,true)?,Vec::new())),
+            Self::AdaptiveAvgPool1d(layer) => Ok((adaptive_pool1d_comp(input,layer.output_size,false)?,Vec::new())),
+            Self::AdaptiveMaxPool2d(layer) => Ok((adaptive_pool2d_comp(input,layer.output_size,true)?,Vec::new())),
+            Self::AdaptiveAvgPool2d(layer) => Ok((adaptive_pool2d_comp(input,layer.output_size,false)?,Vec::new())),
             Self::GlobalMaxPool1d => {
                 if input.ndim() != 3 { return Err(invalid("GlobalMaxPoold1D expects [batch, channels, length]")) }
                 Ok((input.max(2, true)?, Vec::new()))
@@ -378,13 +462,101 @@ pub fn set_wt_b<T: Float>(weight: &mut Tensor<T>,bias: &mut Tensor<T>,params: &[
     Ok(())
 }
 
+fn unflatten<T: Float>(input: &Tensor<T>,layer: &Unflatten) -> Result<Tensor<T>> { Ok(input.reshape(&unflatten_shape(input.shape(),layer)?)?) }
+fn unflatten_comp<T: Float>(input: &Comp<T>,layer: &Unflatten) -> Result<Comp<T>> { Ok(input.reshape(&unflatten_shape(&input.shape(),layer)?)?) }
+
+fn unflatten_shape(shape: &[usize],layer: &Unflatten) -> Result<Vec<isize>> {
+    let dim = if layer.dim < 0 { shape.len() as isize + layer.dim } else { layer.dim }; // Negative indexing
+    if dim < 0 || dim >= shape.len() as isize { return Err(invalid("Unflatten dims is out of range")); }
+    let size = layer.unflattened_size.iter().fold(1usize,|acc,&dim| acc * dim);
+    if shape[dim as usize] != size { return Err(invalid("Unflatten sizes doesnt multiply to selected dim")); }
+    let mut output = shape.iter().map(|&x| x as isize).collect::<Vec<_>>();
+    output.splice(dim as usize..=dim as usize,layer.unflattened_size.iter().map(|&x| x as isize));
+    Ok(output)
+}
+
+fn adaptive_pool1d<T: Float>(input: &Tensor<T>,output_size: usize,max: bool) -> Result<Tensor<T>> {
+    if input.ndim() != 3 { return Err(invalid("AdaptivePool1d expects [batch, channels, length]")); }
+    if output_size == 0 { return Err(invalid("AdaptivePool1d output size must be positive")); }
+    let len = input.shape()[2];
+    let mut outputs = Vec::with_capacity(output_size);
+    for i in 0..output_size {
+        let st = i * len / output_size;
+        let ed = ((i + 1) * len + output_size - 1) / output_size;
+        if ed <= st { return Err(invalid("Adaptive1d Poolling window is empty")); }
+        let bin = input.narrow(2,st,ed-st)?;
+        outputs.push(if max { bin.max(2,true)? } else { bin.mean(2,true)? });
+    }
+    Tensor::cat(& outputs.iter().collect::<Vec<_>>(),2).map_err(Into::into)
+}
+
+fn adaptive_pool2d<T: Float>(input: &Tensor<T>,output_size: (usize,usize),max: bool) -> Result<Tensor<T>> {
+    if input.ndim() != 4 { return Err(invalid("AdaptivePool2d expects [batch, channels, height, width]")); }
+    if output_size.0 == 0 || output_size.1 == 0 { return Err(invalid("AdaptivePool2d output dims must be positive")); }
+    let (h,w) = (input.shape()[2],input.shape()[3]);
+    let mut rows = Vec::with_capacity(output_size.0);
+    for y in 0..output_size.0 {
+        let y0 = y * h / output_size.0;
+        let y1 = ((y + 1) * h + output_size.0 - 1) / output_size.0;
+        if y1 <= y0 { return Err(invalid("Adaptive pool output size exceeds input size")); }
+        let mut cols = Vec::with_capacity(output_size.1);
+        for x in 0..output_size.1 {
+            let x0 = (x * w) / output_size.1;
+            let x1 = ((x + 1) * w + output_size.1 - 1) / output_size.1;
+            if x1 <= x0 { return Err(invalid("Adaptive pool output size exceeds input size")); }
+            let bin = input.narrow(2,y0,y1-y0)?.narrow(3,x0,x1-x0)?;
+            cols.push(if max { bin.max(3,true)?.max(2,true)? } else { bin.mean(3,true)?.mean(2,true)? });
+        }
+        rows.push(Tensor::cat(&cols.iter().collect::<Vec<_>>(),3)?);
+    }
+    Tensor::cat(& rows.iter().collect::<Vec<_>>(),2).map_err(Into::into)
+}
+
+fn adaptive_pool1d_comp<T: Float>(input: &Comp<T>,output_size: usize,max: bool) -> Result<Comp<T>> {
+    let shape = input.shape();
+    if shape.len() != 3 { return Err(invalid("AdaptivePool1d expects [batch, channels, length]")); }
+    if output_size == 0 { return Err(invalid("AdaptivePool1d output size must be positive")); }
+    let mut outputs = Vec::with_capacity(output_size);
+    for i in 0..output_size {
+        let start = i * shape[2] / output_size;
+        let end = ((i + 1) * shape[2] + output_size - 1) / output_size;
+        if end <= start { return Err(invalid("Adaptive pool output size exceeds input size")); }
+        let bin = input.narrow(2,start,end-start)?;
+        outputs.push(if max { bin.max(2,true)? } else { bin.mean(2,true)? });
+    }
+    let refs = outputs.iter().collect::<Vec<_>>();
+    Comp::cat(&refs,2).map_err(Into::into)
+}
+
+fn adaptive_pool2d_comp<T: Float>(input: &Comp<T>,output_size: (usize,usize),max: bool) -> Result<Comp<T>> {
+    let shape = input.shape();
+    if shape.len() != 4 { return Err(invalid("AdaptivePool2d expects [batch, channels, height, width]")); }
+    if output_size.0 == 0 || output_size.1 == 0 { return Err(invalid("Adaptive pool output dims must be positive")); }
+    let mut rows = Vec::with_capacity(output_size.0);
+    for y in 0..output_size.0 {
+        let y0 = y * shape[2] / output_size.0;
+        let y1 = ((y + 1) * shape[2] + output_size.0 - 1) / output_size.0;
+        if y1 <= y0 { return Err(invalid("Adaptive pool output size exceeds input size")); }
+        let mut cols = Vec::with_capacity(output_size.1);
+        for x in 0..output_size.1 {
+            let x0 = x * shape[3] / output_size.1;
+            let x1 = ((x + 1) * shape[3] + output_size.1 - 1) / output_size.1;
+            if x1 <= x0 { return Err(invalid("Adaptive pool output size exceeds input size")); }
+            let bin = input.narrow(2,y0,y1-y0)?.narrow(3,x0,x1-x0)?;
+            cols.push(if max { bin.max(3,true)?.max(2,true)? } else { bin.mean(3,true)?.mean(2,true)? });
+        }
+        rows.push(Comp::cat(&cols.iter().collect::<Vec<_>>(),3)?);
+    }
+    Comp::cat(&rows.iter().collect::<Vec<_>>(),2).map_err(Into::into)
+}
+
 
 
 // Do forward pass
 pub(crate) fn activate_tensor<T: Float>(x: &Tensor<T>,activation: Activation) -> Result<Tensor<T>> {
     validate_activation(activation)?;
     Ok(match activation {
-        Activation::Linear => x.clone(),
+        Activation::None | Activation::Linear => x.clone(),
         Activation::Relu => x.relu()?,
         Activation::LeakyRelu(a) => x.lrelu(T::from_f64(a))?,
         Activation::Sigmoid => x.sigmoid()?,
@@ -406,7 +578,7 @@ pub(crate) fn activate_tensor<T: Float>(x: &Tensor<T>,activation: Activation) ->
 pub(crate) fn apply_activation<T: Float>(x: &Comp<T>, activation: Activation) -> Result<Comp<T>> {
     validate_activation(activation)?;
     Ok(match activation {
-        Activation::Linear => x.clone(),
+        Activation::None | Activation::Linear => x.clone(),
         Activation::Relu => x.relu()?,
         Activation::LeakyRelu(a) => x.lrelu(T::from_f64(a))?,
         Activation::Sigmoid => x.sigmoid()?,
