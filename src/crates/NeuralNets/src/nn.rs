@@ -510,7 +510,8 @@ impl<T: Float> Sequential<T> {
         self.train_graph_on_batch(graph, &target, loss, optim, vec![embedding_node])
     }
 
-    pub fn train_graph_on_batch(&mut self,mut graph: Comp<T>,target: &Tensor<T>,loss: Loss,optim: &mut Optimizer<T>,mut param_comps: Vec<Comp<T>>) -> Result<T> {
+    // internal use for doing backprop comp from the layers    
+    fn train_graph_on_batch(&mut self,mut graph: Comp<T>,target: &Tensor<T>,loss: Loss,optim: &mut Optimizer<T>,mut param_comps: Vec<Comp<T>>) -> Result<T> {
         for layer in &mut self.layers {
             let (next, params) = layer.forward_graph(&graph, true, &mut self.rng)?;
             graph = next;
@@ -527,6 +528,115 @@ impl<T: Float> Sequential<T> {
         Ok(loss_data)
     }
 
+    /// Fit using normal layer pass, with no scheduler
+    pub fn fit(&mut self,input: &Tensor<T>,target: &Tensor<T>,loss: Loss,optim: &mut Optimizer<T>,options: &FitOptions) -> Result<Vec<EpochMetrics>> { self.fit_with(input, target, loss, optim, options, None) }
+
+    /// Fit using the provided scheduler and optimsier
+    pub fn fit_with(&mut self,input: &Tensor<T>,target: &Tensor<T>,loss: Loss,optim: &mut Optimizer<T>,options: &FitOptions,mut scheduler: Option<&mut LrScheduler<T>>) -> Result<Vec<EpochMetrics>> {
+        self.validate_dataset_pair(input, target)?;
+        if options.epochs == 0 || options.batch_size == 0 { return Err(invalid("Epochs and batch size must be non zero")); }
+        let mut rng = Rng::seed(options.seed);
+        let mut indices: Vec<usize> = (0..input.shape()[0]).collect();
+        let mut hist = Vec::with_capacity(options.epochs);
+        for e in 0..options.epochs {
+            if let Some(schedule) = scheduler.as_deref_mut() { schedule.step(e, optim)?; }
+            // Shuffle data at start of each epoch 
+            if options.shuffle { for i in (1..indices.len()).rev() { indices.swap(i, (rng.uniform() * (i + 1) as f64) as usize); } }
+            let mut w_loss = 0.0;
+            let mut seen = 0usize;
+            for batch in indices.chunks(options.batch_size) {
+                let x = input.index_select(0, batch)?;
+                let y = target.index_select(0, batch)?;
+                let v = self.train_on_batch(&x, &y, loss, optim)?;
+                w_loss += v.to_f64() * batch.len() as f64; // weighted loss
+                seen += batch.len();
+            }
+            hist.push(EpochMetrics {epoch: e + 1,loss: w_loss / seen as f64,samples: seen});
+        }
+        Ok(hist)
+    }
+
+    /// Fit using the provided scheduler and optimsier
+    pub fn fit_with_sched(&mut self,input: &Tensor<T>,target: &Tensor<T>,loss: Loss,optim: &mut Optimizer<T>,options: &FitOptions,scheduler: &mut LrScheduler<T>) -> Result<Vec<EpochMetrics>> { self.fit_with(input, target, loss, optim, options, Some(scheduler)) }
+
+    /// Fit tokens using provided sched and optim
+    pub fn fit_tok_with(&mut self,token_ids: &Tensor<i32>,target: &Tensor<T>,loss: Loss,optim: &mut Optimizer<T>,options: &FitOptions,mut scheduler: Option<&mut LrScheduler<T>>) -> Result<Vec<EpochMetrics>> {
+        if self.embedding.is_none() { return Err(invalid("No embedding layer")); }
+        if token_ids.ndim() != 2 || token_ids.shape()[0] == 0 || token_ids.shape()[1] == 0 {return Err(invalid("Tokens must have shape [batch, sequence] with non zero dimsm"));}
+        if target.ndim() < 2 || target.shape()[0] != token_ids.shape()[0] || target.shape()[1] != token_ids.shape()[1]{ return Err(invalid("Target must have [batch, sequence] leading dims"));}
+        if token_ids.device() != self.device { return Err(invalid("Token ids and model params must be on the same dev")); }
+        if options.epochs == 0 || options.batch_size == 0 { return Err(invalid("Epochs and batch size must be non zero"));}
+        let embedding_weights = self.embedding.as_ref().ok_or_else(|| invalid("No embedding layer "))?.weights.clone();
+        target.same_device(&embedding_weights)?;
+        let mut rng = Rng::seed(options.seed);
+        let mut indices: Vec<usize> = (0..token_ids.shape()[0]).collect();
+        let tok_per_seq = token_ids.shape()[1];
+        let mut hist = Vec::with_capacity(options.epochs);
+        for e in 0..options.epochs {
+            if let Some(schedule) = scheduler.as_deref_mut() { schedule.step(e, optim)?; }
+            // Shuffle data every epoch
+            if options.shuffle { for i in (1..indices.len()).rev() { indices.swap(i,  (rng.uniform() * (i + 1) as f64) as usize); } }
+            let mut w_loss = 0.0;
+            let mut n_tok = 0usize;
+            let mut n_seq = 0usize;
+            for batch in indices.chunks(options.batch_size) {
+                let x = token_ids.index_select(0, batch)?;
+                let y = target.index_select(0, batch)?;
+                let tok_cnt = batch.len() * tok_per_seq;
+                let v = self.train_tokens_on_batch(&x, &y, loss, optim)?;
+                w_loss += v.to_f64() * tok_cnt as f64;
+                n_tok += tok_cnt;
+                n_seq += batch.len();
+            }
+            hist.push(EpochMetrics {epoch: e + 1,loss: w_loss / n_tok as f64,samples: n_seq});
+        }
+        Ok(hist)
+    }
+
+    /// Fits token without sched
+    pub fn fit_tok(&mut self,token_ids: &Tensor<i32>,target: &Tensor<T>,loss: Loss,optim: &mut Optimizer<T>,options: &FitOptions) -> Result<Vec<EpochMetrics>> { self.fit_tok_with(token_ids, target, loss, optim, options, None) }
+
+
+    /// Fits token class index using sched and loss
+    pub fn fit_tok_classidx_with(&mut self,token_ids: &Tensor<i32>,labels: &Tensor<i32>,loss: Loss,optim: &mut Optimizer<T>,options: &FitOptions,scheduler: Option<&mut LrScheduler<T>>) -> Result<Vec<EpochMetrics>> {
+        if !matches!(loss,Loss::CategoricalCrossEntropy | Loss::CategoricalCrossEntropyWithLogits) { return Err(invalid("CCELoss required for fitting classes")); }
+        if token_ids.ndim() != 2 || labels.shape() != token_ids.shape() { return Err(invalid("Labels and token id shape must be [batch, seq]")); }
+        self.fit_tok_with(token_ids, &one_hot::<T>(labels,self.output_size().ok_or_else(|| invalid("Network has no output"))?, self.device)?, loss, optim, options, scheduler)
+    }
+    
+    /// Fits token class index without sched using CCELoss
+    pub fn fit_tok_classidx(&mut self,token_ids: &Tensor<i32>,labels: &Tensor<i32>,optim: &mut Optimizer<T>,options: &FitOptions) -> Result<Vec<EpochMetrics>> { self.fit_tok_classidx_with(token_ids,labels,Loss::CategoricalCrossEntropy,optim,options,None) }
+
+
+    /// Fit input taht is categorical using loss
+    pub fn fit_classidx_with(&mut self,input: &Tensor<T>,labels: &Tensor<i32>,loss: Loss,optim: &mut Optimizer<T>,options: &FitOptions) -> Result<Vec<EpochMetrics>> {
+        if !matches!(loss,Loss::CategoricalCrossEntropy | Loss::CategoricalCrossEntropyWithLogits) { return Err(invalid("CCELoss required for class idx fitting")); }
+        if labels.ndim() != 1 || labels.shape()[0] != input.shape().first().copied().unwrap_or(0) { return Err(invalid("Labels and input must have shape [batch]")); }
+        self.fit(input, &one_hot::<T>(labels, self.output_size().ok_or_else(|| invalid("Network has no output"))?, self.device)?, loss, optim, options)
+    }
+
+    /// Fit input that is catgorical using CCELoss
+    pub fn fit_classidx(&mut self,input: &Tensor<T>,labels: &Tensor<i32>,optim: &mut Optimizer<T>,options: &FitOptions) -> Result<Vec<EpochMetrics>> { self.fit_classidx_with(input,labels,Loss::CategoricalCrossEntropy,optim,options) }
+
+
+    /// Fit input that is catgorical using a schedule
+    pub fn fit_classidx_with_sched(&mut self,input: &Tensor<T>,labels: &Tensor<i32>,loss: Loss,optim: &mut Optimizer<T>,options: &FitOptions,scheduler: &mut LrScheduler<T>) -> Result<Vec<EpochMetrics>> {
+        if !matches!(loss,Loss::CategoricalCrossEntropy | Loss::CategoricalCrossEntropyWithLogits) { return Err(invalid("CCELoss required for class idx fitting")); }
+        if labels.ndim() != 1 || labels.shape()[0] != input.shape().first().copied().unwrap_or(0) { return Err(invalid("Labels and input must have shape [batch]")); }
+        self.fit_with_sched(input,&one_hot::<T>(labels,self.output_size().ok_or_else(|| invalid("network has no output layer"))?, self.device)?, loss, optim, options, scheduler)
+    }
+
+    pub fn eval_classidx(&self,input: &Tensor<T>,labels: &Tensor<i32>,loss: Loss) -> Result<T> {
+        if !matches!(loss,Loss::CategoricalCrossEntropy | Loss::CategoricalCrossEntropyWithLogits) { return Err(invalid("Class idx eval is only for CCELoss")); }
+        let classes = self.output_size().ok_or_else(|| invalid("Network has no output"))?;
+        if labels.ndim() != 1 || labels.shape()[0] != input.shape().first().copied().unwrap_or(0) { return Err(invalid("Class labels and input must have shape [batch]")); }
+        self.eval(input, &one_hot::<T>(labels, classes, self.device)?, loss)
+    }
+
+    pub fn eval(&self, input: &Tensor<T>, target: &Tensor<T>, loss: Loss) -> Result<T> {
+        self.validate_dataset_pair(input, target)?;
+        metrics_loss_value(&self.forward(input)?, target, loss)
+    }
 
     /// Validates if input is proper to the sequential api
     pub fn validate_input(&self, input: &Tensor<T>) -> Result<()> {
