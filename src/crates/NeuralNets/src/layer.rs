@@ -1,6 +1,6 @@
 use Tensors::{autograd::Comp, dtype::Float, tensor::Tensor};
 use Utilities::random::Random::Rng;
-use crate::{common::{Activation, Initializer, Result, flatten, invalid, validate_activation, validate_feature_input}, layers::{basic::{BatchNorm1d, Dense, Dropout, Identity, LayerNorm, PRelu, RMSNorm, ResidualBlock, Unflatten}, cnn::{AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d, AvgPool2d, Conv1d, Conv2d, ConvTranspose1d, ConvTranspose2d, MaxPool1d, MaxPool2d, validate_conv1d_input}}};
+use crate::{common::{Activation, Initializer, Result, flatten, invalid, validate_activation, validate_feature_input}, layers::{basic::{BatchNorm1d, Dense, Dropout, Identity, LayerNorm, PRelu, RMSNorm, ResidualBlock, Unflatten}, cnn::{AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d, AvgPool2d, Conv1d, Conv2d, ConvTranspose1d, ConvTranspose2d, MaxPool1d, MaxPool2d, validate_conv1d_input}, rnn::{Gru, Lstm}}};
 
 /// Layer Wrapper using for NN
 #[derive(Clone,Debug)]
@@ -32,6 +32,8 @@ pub enum Layer<T: Float> {
     GlobalMaxPool1d,
     GlobalAvgPool2d,
     GlobalMaxPool2d,
+    Lstm(Lstm<T>),
+    Gru(Gru<T>),
 }
 
 impl<T: Float> Layer<T> {
@@ -49,6 +51,8 @@ impl<T: Float> Layer<T> {
             Self::BatchNorm1d(x) => vec![x.weight.clone(), x.bias.clone()],
             Self::PRelu(x) => vec![x.weight.clone()],
             Self::Residual(x) => x.layers.iter().flat_map(Layer::params).collect(),
+            Self::Lstm(x) => vec![x.w_ih.clone(), x.w_hh.clone(), x.b_ih.clone(), x.b_hh.clone()],
+            Self::Gru(x) => vec![x.w_ih.clone(), x.w_hh.clone(), x.b_ih.clone(), x.b_hh.clone()],
             _ => Vec::new(),
         }
     }
@@ -75,6 +79,8 @@ impl<T: Float> Layer<T> {
             Layer::Residual(x) => x.layers.iter().for_each(|x| x._param_cnt_helper(cnt)),
             Layer::ConvTranspose1d(x) => *cnt += x.param_count(),
             Layer::ConvTranspose2d(x) => *cnt += x.param_count(),
+            Layer::Lstm(x) => *cnt += x.param_count(),
+            Layer::Gru(x) => *cnt += x.param_count(),
             Layer::RMSNorm(x) => *cnt += x.param_count(),
         };
     }
@@ -90,6 +96,8 @@ impl<T: Float> Layer<T> {
             Self::Conv2d(layer) => layer.set_parameters(params),
             Self::ConvTranspose1d(layer) => layer.set_parameters(params),
             Self::ConvTranspose2d(layer) => layer.set_parameters(params),
+            Self::Lstm(layer) => layer.set_parameters(params),
+            Self::Gru(layer) => layer.set_parameters(params),
             Self::LayerNorm(layer) => set_wt_b(&mut layer.weight, &mut layer.bias, params),
             Self::RMSNorm(layer) => {
                 if params.len() != 1 || params[0].shape() != layer.weight.shape() { return Err(invalid("RMS norm params shape mismatch")); }
@@ -131,6 +139,8 @@ impl<T: Float> Layer<T> {
             Self::Conv2d(x) => Some(x.out_channels),
             Self::ConvTranspose1d(x) => Some(x.out_channels),
             Self::ConvTranspose2d(x) => Some(x.out_channels),
+            Self::Lstm(x) => Some(x.hidden_sz),
+            Self::Gru(x) => Some(x.hidden_sz),
             Self::LayerNorm(x) => Some(x.features),
             Self::RMSNorm(x) => Some(x.features),
             Self::BatchNorm1d(x) => Some(x.features),
@@ -148,6 +158,8 @@ impl<T: Float> Layer<T> {
             Self::Conv2d(layer) => layer.forward(input),
             Self::ConvTranspose1d(layer) => layer.forward(input),
             Self::ConvTranspose2d(layer) => layer.forward(input),
+            Self::Lstm(layer) => layer.forward(input),
+            Self::Gru(layer) => layer.forward(input),
             Self::Identity(_) => Ok(input.clone()),
             Self::Unflatten(layer) => unflatten(input,layer),
             Self::Dropout(_) => Ok(input.clone()),
@@ -295,6 +307,8 @@ impl<T: Float> Layer<T> {
                 });
                 Ok((apply_activation(&conv.squeeze(2)?,layer.activation)?,vec![w,b]))
             },
+            Self::Lstm(layer) => layer.forward_graph(input),
+            Self::Gru(layer) => layer.forward_graph(input),
             Self::Dropout(layer) => {
                 if !training || layer.probability == 0.0 { return Ok((input.clone(), Vec::new())); }
                 let data = input.data();

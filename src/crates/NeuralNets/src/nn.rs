@@ -1,6 +1,6 @@
 use Tensors::{autograd::Comp, dtype::Float, tensor::Tensor};
 use Utilities::{device::Device::Device, random::Random::Rng};
-use crate::{common::{Activation, EpochMetrics, FitOptions, Initializer, Loss, Result, invalid}, layer::Layer,layers::{basic::*,cnn::*,spec::*}, loss::{loss_comp, metrics_loss_value, one_hot}, optim::{LrScheduler, Optimizer}};
+use crate::{common::{Activation, EpochMetrics, FitOptions, Initializer, Loss, Result, invalid}, layer::Layer,layers::{basic::*,cnn::*,rnn::*,spec::*}, loss::{loss_comp, metrics_loss_value, one_hot}, optim::{LrScheduler, Optimizer}};
 
 /// Similar to Pytorch Sequential api
 pub struct Sequential<T: Float> {
@@ -46,7 +46,14 @@ impl<T: Float> Sequential<T> {
     pub fn device(&self) -> Device {self.device}
 
     /// The input size to the Sequential layers
-    pub fn input_size(&self) -> Option<usize> { self.layers.iter().find_map(|l| {if let Layer::Dense(d) = l { Some(d.input_size()) } else { None }}) }
+    pub fn input_size(&self) -> Option<usize> { 
+        self.layers.iter().find_map(|l| { match l { 
+                Layer::Dense(d) => Some(d.input_size()),
+                Layer::Lstm(r) => Some(r.input_sz), 
+                Layer::Gru(r) => Some(r.input_sz),
+                 _ => None 
+            }})
+    }
 
     /// Output size of the Sequential layers:
     pub fn output_size(&self) -> Option<usize> {
@@ -62,6 +69,8 @@ impl<T: Float> Sequential<T> {
                 Layer::RMSNorm(x) => return Some(x.features),
                 Layer::BatchNorm1d(x) => return Some(x.features),
                 Layer::Flatten => return None,
+                Layer::Lstm(x) => return Some(x.hidden_sz),
+                Layer::Gru(x) => return Some(x.hidden_sz),
                 _ => {}
             }
         }
@@ -139,6 +148,8 @@ impl<T: Float> Sequential<T> {
                 Layer::BatchNorm1d(n) => {last_features = Some(n.features);break;},
                 Layer::PRelu(n) => {last_features = Some(n.features);break;},
                 Layer::Flatten => break,
+                Layer::Lstm(d) => {last_features = Some(d.hidden_sz);break;},
+                Layer::Gru(d) => {last_features = Some(d.hidden_sz);break;},
                 _ => {}
             }
         }
@@ -173,6 +184,14 @@ impl<T: Float> Sequential<T> {
 
         if let (Some(last), Layer::ConvTranspose2d(next)) = (last_features, &layer) {
             if last != next.in_channels { return Err(invalid(format!("Convolution channels {} do not match previous feature count {last}",next.in_channels))); }
+        }
+
+        if let (Some(last), Layer::Lstm(next)) = (last_features, &layer) {
+            if last != next.input_sz { return Err(invalid(format!("LSTM input size {} does not match previous feature count {last}",next.input_sz))); }
+        }
+
+        if let (Some(last), Layer::Gru(next)) = (last_features, &layer) {
+            if last != next.input_sz { return Err(invalid(format!("GRU input size {} does not match previous feature count {last}",next.input_sz))); }
         }
 
         self.layers.push(layer);
@@ -438,6 +457,35 @@ impl<T: Float> Sequential<T> {
     pub fn add_residual(&mut self, layers: Vec<Layer<T>>) -> Result<&mut Self> { self.add_layer(Layer::Residual(Box::new(ResidualBlock::new(layers)?))) }
     /// Adds a preinitialised Residual layer
     pub fn append_residual(&mut self, layer: ResidualBlock<T>) -> Result<&mut Self> { self.add_layer(Layer::Residual(Box::new(layer))) }
+
+    // ---------------------------------------------- LSTM -----------------------------------------------
+    /// Adds an LSTM layer with the selected initializer
+    pub fn emplace_lstm(&mut self,input_size: usize,hidden_size: usize,initializer: Initializer,rng: &mut Rng) -> Result<&mut Self> { self.add_layer(Layer::Lstm(Lstm::new(input_size,hidden_size,initializer,rng,self.device)?)) }
+
+    /// Adds an LSTM layer with default Xavier uniform initialization
+    pub fn add_lstm(&mut self,input_size: usize,hidden_size: usize) -> Result<&mut Self> {
+        let mut rng = self.rng.clone();
+        self.add_layer(Layer::Lstm(Lstm::new(input_size,hidden_size,Initializer::XavierUniform,&mut rng,self.device)?))
+    }
+
+    /// Adds a preinitialized LSTM layer
+    pub fn append_lstm(&mut self,layer: Lstm<T>) -> Result<&mut Self> { self.add_layer(Layer::Lstm(layer)) }
+
+    // ---------------------------------------------- GRU -----------------------------------------------
+    /// Adds a GRU layer with the selected initializer
+    pub fn emplace_gru(&mut self,input_size: usize,hidden_size: usize,initializer: Initializer,rng: &mut Rng) -> Result<&mut Self> { self.add_layer(Layer::Gru(Gru::new(input_size,hidden_size,initializer,rng,self.device)?)) }
+
+    /// Adds a GRU layer with default Xavier uniform initialization
+    pub fn add_gru(&mut self,input_size: usize,hidden_size: usize) -> Result<&mut Self> {
+        let mut rng = self.rng.clone();
+        self.add_layer(Layer::Gru(Gru::new(input_size,hidden_size,Initializer::XavierUniform,&mut rng,self.device)?))
+    }
+
+    /// Adds a preinitialized GRU layer
+    pub fn append_gru(&mut self,layer: Gru<T>) -> Result<&mut Self> { self.add_layer(Layer::Gru(layer)) }
+
+
+
 
     /// Inference fwd
     /// Dropout layer is disabled and layernorm use running stats 
