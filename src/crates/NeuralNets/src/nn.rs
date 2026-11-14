@@ -1,6 +1,6 @@
 use Tensors::{autograd::Comp, dtype::Float, tensor::Tensor};
 use Utilities::{device::Device::Device, random::Random::Rng};
-use crate::{common::{Activation, EpochMetrics, FitOptions, Initializer, Loss, Result, invalid}, layer::Layer,layers::{basic::*,cnn::*,rnn::*,spec::*}, loss::{loss_comp, metrics_loss_value, one_hot}, optim::{LrScheduler, Optimizer}};
+use crate::{common::{Activation, EpochMetrics, FitOptions, Initializer, Loss, Result, invalid}, layer::{self, Layer}, layers::{basic::*,cnn::*,rnn::*,spec::*}, loss::{loss_comp, metrics_loss_value, one_hot}, optim::{LrScheduler, Optimizer}};
 
 /// Similar to Pytorch Sequential api
 pub struct Sequential<T: Float> {
@@ -24,6 +24,12 @@ impl<T: Float> Sequential<T> {
 
     /// Make a new Sequential object  on device 
     pub fn new_on(device: Device) -> Self { Self {layers: Vec::new(),embedding: None,device,rng: Rng::seed(42)} }
+
+    /// Init using an array of Layers
+    pub fn new_from(layers:&[Layer<T>],tok_emb: Option<TokenEmbedding<T>>) -> Self{
+        let device = tok_emb.as_ref().map(|embedding| embedding.weights.device()).or_else(|| layers.iter().flat_map(Layer::params).next().map(|parameter| parameter.device())).unwrap_or(Device::Cpu);
+        Self {layers: layers.to_vec(),embedding: tok_emb,device,rng: Rng::seed(42)}
+    }
 
     /// Update the seed
     pub fn set_seed(&mut self, seed: u64) {self.rng = Rng::seed(seed);}
@@ -117,9 +123,34 @@ impl<T: Float> Sequential<T> {
 
     /// Attach an embedding layer before the rest of the layers
     /// Works only when embedding layer doesnt exist of the layers are empty
-    pub fn add_embedding(&mut self,vocabulary_size: usize,embedding_dim: usize,initializer: Initializer,rng: &mut Rng) -> Result<&mut Self> {
+    pub fn emplace_embedding(&mut self,vocabulary_size: usize,embedding_dim: usize,initializer: Initializer,rng: &mut Rng) -> Result<&mut Self> {
         if self.embedding.is_some() || !self.layers.is_empty() { return Err(invalid("embedding must be the first and only embedding module in a sequential model")); }
         self.embedding = Some(TokenEmbedding::new(vocabulary_size,embedding_dim,initializer,rng,self.device)?);
+        Ok(self)
+    }
+
+    /// Attach embedding layer but only if layers is empty     
+    pub fn add_embedding(&mut self,embed: TokenEmbedding<T>) -> Result<&mut Self>{
+        if !self.layers.is_empty() { return Err(invalid("embedding must be the first and only embedding module in a sequential model")); }
+        self.embedding = Some(embed);
+        Ok(self)
+    }
+
+    /// Attach embedding layer but will not only do so when the input size of the first layer will be equal to embed_dim
+    pub fn attach_embedding(&mut self,embed: TokenEmbedding<T>) -> Result<&mut Self> {
+        if embed.vocab_sz == 0 || embed.embed_dim == 0 || embed.weights.shape() != [embed.vocab_sz, embed.embed_dim] { return Err(invalid("Embedding weights must match its positive vocabulary and embedding dimensions")); }
+        if let Some(expected) = self.layers.iter().find_map(Layer::input_size) {
+            if expected != embed.embed_dim { return Err(invalid(format!("Embedding dimension {} does not match first layer input size {expected}", embed.embed_dim))); }
+        }
+        if !self.layers.is_empty() && embed.weights.device() != self.device { return Err(invalid("Embedding parameters must use the model device")); }
+        if self.layers.is_empty() { self.device = embed.weights.device(); }
+        self.embedding = Some(embed);
+        Ok(self)
+    }
+
+    /// Adds multiple layers
+    pub fn add_layers(&mut self,layers: Vec<Layer<T>>) -> Result<&mut Self>{
+        for i in layers{ self.add_layer(i)?;}
         Ok(self)
     }
 
@@ -483,9 +514,6 @@ impl<T: Float> Sequential<T> {
 
     /// Adds a preinitialized GRU layer
     pub fn append_gru(&mut self,layer: Gru<T>) -> Result<&mut Self> { self.add_layer(Layer::Gru(layer)) }
-
-
-
 
     /// Inference fwd
     /// Dropout layer is disabled and layernorm use running stats 

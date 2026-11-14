@@ -27,4 +27,15 @@ pub mod Device{
         }
     }
 
+    impl From<&str> for Device{
+        fn from(value: &str) -> Self {
+            match value{
+                "cpu" => return Device::Cpu,
+                _ => {}
+            }
+            let k = value.strip_prefix("cuda:").and_then(|x| x.strip_prefix("dev:")).and_then(|x| x.strip_prefix("gpu:")).and_then(|x| x.strip_prefix(":")).unwrap();
+            Self::Cuda(k.parse().expect("The device str has to be of the fmt cpu,cuda:x,dev:x,gpu:x or :x"))
+        }
+    }
+
 }

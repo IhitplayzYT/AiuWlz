@@ -150,6 +150,24 @@ impl<T: Float> Layer<T> {
         }
     }
 
+    pub fn input_size(&self) -> Option<usize>{
+        match self {
+            Self::Dense(x) => Some(x.input_size()),
+            Self::Conv1d(x) => Some(x.in_channels),
+            Self::Conv2d(x) => Some(x.in_channels),
+            Self::ConvTranspose1d(x) => Some(x.in_channels),
+            Self::ConvTranspose2d(x) => Some(x.in_channels),
+            Self::Lstm(x) => Some(x.input_sz),
+            Self::Gru(x) => Some(x.input_sz),
+            Self::LayerNorm(x) => Some(x.input_size()),
+            Self::RMSNorm(x) => Some(x.features),
+            Self::BatchNorm1d(x) => Some(x.input_size()),
+            Self::PRelu(x) => Some(x.features),
+            Self::Flatten | Self::Dropout(_) | Self::Identity(_) | Self::Activation(_) | Self::MaxPool1d(_) | Self::MaxPool2d(_) | Self::AvgPool1d(_) | Self::AvgPool2d(_) | Self::AdaptiveAvgPool1d(_) | Self::AdaptiveAvgPool2d(_) | Self::AdaptiveMaxPool1d(_) | Self::AdaptiveMaxPool2d(_) | Self::GlobalAvgPool1d | Self::GlobalAvgPool2d | Self::GlobalMaxPool1d | Self::GlobalMaxPool2d | Self::Unflatten(_) => None,
+            Self::Residual(x) => x.layers.iter().find_map(Layer::input_size)
+        }
+    }
+
     /// Fwd pass
     pub fn forward(&self, input: &Tensor<T>) -> Result<Tensor<T>> {
         match self {

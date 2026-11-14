@@ -169,6 +169,218 @@ extern "C" __global__ void scalar_k(T* out, const T* a, size_t n, T scalar, int 
     }
 }
 
+// NCHW input, OIHW kernel. One thread computes one output element.
+extern "C" __global__ void conv2d_forward_k(
+    T* out, const T* inp, const T* weights, const T* bias,
+    size_t n, size_t c, size_t h, size_t w, size_t oc,
+    size_t kh, size_t kw, size_t oh, size_t ow,
+    size_t sh, size_t sw, size_t ph, size_t pw
+) {
+    size_t q = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    size_t total = n * oc * oh * ow;
+    if (q >= total) return;
+    size_t ox = q % ow;
+    size_t oy = (q / ow) % oh;
+    size_t out_c = (q / (ow * oh)) % oc;
+    size_t batch = q / (ow * oh * oc);
+    T sum = bias[out_c];
+    for (size_t in_c = 0; in_c < c; ++in_c) {
+        for (size_t ky = 0; ky < kh; ++ky) {
+            long long iy = (long long)(oy * sh + ky) - (long long)ph;
+            if (iy < 0 || iy >= (long long)h) continue;
+            for (size_t kx = 0; kx < kw; ++kx) {
+                long long ix = (long long)(ox * sw + kx) - (long long)pw;
+                if (ix < 0 || ix >= (long long)w) continue;
+                size_t xi = ((batch * c + in_c) * h + (size_t)iy) * w + (size_t)ix;
+                size_t wi = ((out_c * c + in_c) * kh + ky) * kw + kx;
+                sum += inp[xi] * weights[wi];
+            }
+        }
+    }
+    out[q] = sum;
+}
+
+extern "C" __global__ void conv2d_dx_k(
+    T* dx, const T* weights, const T* grad,
+    size_t n, size_t c, size_t h, size_t w, size_t oc,
+    size_t kh, size_t kw, size_t oh, size_t ow,
+    size_t sh, size_t sw, size_t ph, size_t pw
+) {
+    size_t q = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    size_t total = n * c * h * w;
+    if (q >= total) return;
+    size_t ix = q % w;
+    size_t iy = (q / w) % h;
+    size_t in_c = (q / (w * h)) % c;
+    size_t batch = q / (w * h * c);
+    T sum = (T)0;
+    for (size_t out_c = 0; out_c < oc; ++out_c) {
+        for (size_t ky = 0; ky < kh; ++ky) {
+            long long oy_num = (long long)iy + (long long)ph - (long long)ky;
+            if (oy_num < 0 || oy_num % (long long)sh != 0) continue;
+            size_t oy = (size_t)(oy_num / (long long)sh);
+            if (oy >= oh) continue;
+            for (size_t kx = 0; kx < kw; ++kx) {
+                long long ox_num = (long long)ix + (long long)pw - (long long)kx;
+                if (ox_num < 0 || ox_num % (long long)sw != 0) continue;
+                size_t ox = (size_t)(ox_num / (long long)sw);
+                if (ox >= ow) continue;
+                size_t gi = ((batch * oc + out_c) * oh + oy) * ow + ox;
+                size_t wi = ((out_c * c + in_c) * kh + ky) * kw + kx;
+                sum += grad[gi] * weights[wi];
+            }
+        }
+    }
+    dx[q] = sum;
+}
+
+extern "C" __global__ void conv2d_dw_k(
+    T* dw, const T* inp, const T* grad,
+    size_t n, size_t c, size_t h, size_t w, size_t oc,
+    size_t kh, size_t kw, size_t oh, size_t ow,
+    size_t sh, size_t sw, size_t ph, size_t pw
+) {
+    size_t q = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    size_t total = oc * c * kh * kw;
+    if (q >= total) return;
+    size_t kx = q % kw;
+    size_t ky = (q / kw) % kh;
+    size_t in_c = (q / (kw * kh)) % c;
+    size_t out_c = q / (kw * kh * c);
+    T sum = (T)0;
+    for (size_t batch = 0; batch < n; ++batch) {
+        for (size_t oy = 0; oy < oh; ++oy) {
+            long long iy = (long long)(oy * sh + ky) - (long long)ph;
+            if (iy < 0 || iy >= (long long)h) continue;
+            for (size_t ox = 0; ox < ow; ++ox) {
+                long long ix = (long long)(ox * sw + kx) - (long long)pw;
+                if (ix < 0 || ix >= (long long)w) continue;
+                size_t xi = ((batch * c + in_c) * h + (size_t)iy) * w + (size_t)ix;
+                size_t gi = ((batch * oc + out_c) * oh + oy) * ow + ox;
+                sum += inp[xi] * grad[gi];
+            }
+        }
+    }
+    dw[q] = sum;
+}
+
+extern "C" __global__ void conv2d_db_k(T* db, const T* grad, size_t n, size_t oc, size_t oh, size_t ow) {
+    size_t out_c = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (out_c >= oc) return;
+    T sum = (T)0;
+    for (size_t batch = 0; batch < n; ++batch)
+        for (size_t oy = 0; oy < oh; ++oy)
+            for (size_t ox = 0; ox < ow; ++ox)
+                sum += grad[((batch * oc + out_c) * oh + oy) * ow + ox];
+    db[out_c] = sum;
+}
+
+// Transposed convolution with IOHW weights, matching Tensor::conv_transpose2d.
+extern "C" __global__ void conv_transpose2d_forward_k(
+    T* out, const T* inp, const T* weights,
+    size_t n, size_t ic, size_t h, size_t w, size_t oc,
+    size_t kh, size_t kw, size_t oh, size_t ow,
+    size_t sh, size_t sw, size_t ph, size_t pw
+) {
+    size_t q = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    size_t total = n * oc * oh * ow;
+    if (q >= total) return;
+    size_t ox = q % ow;
+    size_t oy = (q / ow) % oh;
+    size_t out_c = (q / (ow * oh)) % oc;
+    size_t batch = q / (ow * oh * oc);
+    T sum = (T)0;
+    for (size_t in_c = 0; in_c < ic; ++in_c) {
+        for (size_t ky = 0; ky < kh; ++ky) {
+            long long iy_num = (long long)oy + (long long)ph - (long long)ky;
+            if (iy_num < 0 || iy_num % (long long)sh != 0) continue;
+            size_t iy = (size_t)(iy_num / (long long)sh);
+            if (iy >= h) continue;
+            for (size_t kx = 0; kx < kw; ++kx) {
+                long long ix_num = (long long)ox + (long long)pw - (long long)kx;
+                if (ix_num < 0 || ix_num % (long long)sw != 0) continue;
+                size_t ix = (size_t)(ix_num / (long long)sw);
+                if (ix >= w) continue;
+                size_t xi = ((batch * ic + in_c) * h + iy) * w + ix;
+                size_t wi = ((in_c * oc + out_c) * kh + ky) * kw + kx;
+                sum += inp[xi] * weights[wi];
+            }
+        }
+    }
+    out[q] = sum;
+}
+
+extern "C" __global__ void conv_transpose2d_dx_k(
+    T* dx, const T* weights, const T* grad,
+    size_t n, size_t ic, size_t h, size_t w, size_t oc,
+    size_t kh, size_t kw, size_t oh, size_t ow,
+    size_t sh, size_t sw, size_t ph, size_t pw
+) {
+    size_t q = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    size_t total = n * ic * h * w;
+    if (q >= total) return;
+    size_t ix = q % w;
+    size_t iy = (q / w) % h;
+    size_t in_c = (q / (w * h)) % ic;
+    size_t batch = q / (w * h * ic);
+    T sum = (T)0;
+    for (size_t out_c = 0; out_c < oc; ++out_c) {
+        for (size_t ky = 0; ky < kh; ++ky) {
+            long long oy = (long long)(iy * sh) - (long long)ph + (long long)ky;
+            if (oy < 0 || oy >= (long long)oh) continue;
+            for (size_t kx = 0; kx < kw; ++kx) {
+                long long ox = (long long)(ix * sw) - (long long)pw + (long long)kx;
+                if (ox < 0 || ox >= (long long)ow) continue;
+                size_t gi = ((batch * oc + out_c) * oh + (size_t)oy) * ow + (size_t)ox;
+                size_t wi = ((in_c * oc + out_c) * kh + ky) * kw + kx;
+                sum += grad[gi] * weights[wi];
+            }
+        }
+    }
+    dx[q] = sum;
+}
+
+extern "C" __global__ void conv_transpose2d_dw_k(
+    T* dw, const T* inp, const T* grad,
+    size_t n, size_t ic, size_t h, size_t w, size_t oc,
+    size_t kh, size_t kw, size_t oh, size_t ow,
+    size_t sh, size_t sw, size_t ph, size_t pw
+) {
+    size_t q = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    size_t total = ic * oc * kh * kw;
+    if (q >= total) return;
+    size_t kx = q % kw;
+    size_t ky = (q / kw) % kh;
+    size_t out_c = (q / (kw * kh)) % oc;
+    size_t in_c = q / (kw * kh * oc);
+    T sum = (T)0;
+    for (size_t batch = 0; batch < n; ++batch) {
+        for (size_t iy = 0; iy < h; ++iy) {
+            long long oy = (long long)(iy * sh) - (long long)ph + (long long)ky;
+            if (oy < 0 || oy >= (long long)oh) continue;
+            for (size_t ix = 0; ix < w; ++ix) {
+                long long ox = (long long)(ix * sw) - (long long)pw + (long long)kx;
+                if (ox < 0 || ox >= (long long)ow) continue;
+                size_t xi = ((batch * ic + in_c) * h + iy) * w + ix;
+                size_t gi = ((batch * oc + out_c) * oh + (size_t)oy) * ow + (size_t)ox;
+                sum += inp[xi] * grad[gi];
+            }
+        }
+    }
+    dw[q] = sum;
+}
+
+extern "C" __global__ void conv_transpose2d_db_k(T* db, const T* grad, size_t n, size_t oc, size_t oh, size_t ow) {
+    size_t out_c = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (out_c >= oc) return;
+    T sum = (T)0;
+    for (size_t batch = 0; batch < n; ++batch)
+        for (size_t oy = 0; oy < oh; ++oy)
+            for (size_t ox = 0; ox < ow; ++ox)
+                sum += grad[((batch * oc + out_c) * oh + oy) * ow + ox];
+    db[out_c] = sum;
+}
+
 // Parallel Fill
 extern "C" __global__ void fill_k(T* out, size_t n, T value) {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;

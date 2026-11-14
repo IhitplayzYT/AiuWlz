@@ -5,6 +5,7 @@ use crate::error::{DataloaderError, Result};
 use crate::types::{DataColumn, DataValue};
 use Tensors::{dtype::Element, tensor::Tensor};
 use image::{DynamicImage, GenericImageView, ImageFormat, ImageReader};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -89,6 +90,12 @@ impl Image {
         let values = rgb.into_raw().into_iter().map(|value| { T::from_f64(if normalize { value as f64 / 255.0 } else { value as f64 })}).collect();
         self.tensor_from_hwc(values, w, h, layout)
     }
+    /// Convert an image into tensor of specified w and h
+    pub fn to_sized_tensor(&self,w:u32,h:u32) -> Result<Tensor<f32>> {
+        if w == 0 || h == 0 { return Err(DataloaderError::ShapeMismatch("Resize dims must be non zero".into()));}
+        let resized = self.as_dyn_img().resize_exact(w,h,image::imageops::FilterType::Lanczos3);
+        Ok(Image::from_dyn_img(resized).to_tensor(ImageTensorLayout::ChannelsFirst, true)?)
+    }
 
     /// Convert an image into tensor with channel wise norm
     /// normalise flag produces elements in the range [0,1)
@@ -118,6 +125,42 @@ impl Image {
     }
 }
 
+pub fn image_tensor(image: &Image,w:u32,h:u32) -> Result<Tensor<f32>> {
+    if w == 0 || h == 0 { return Err(DataloaderError::ShapeMismatch("Resize dims must be non zero".into()));}
+    let resized = image.as_dyn_img().resize_exact(w,h,image::imageops::FilterType::Lanczos3);
+    Ok(Image::from_dyn_img(resized).to_tensor(ImageTensorLayout::ChannelsFirst, true)?)
+}
+
+/// From the provided root and class_to_id hashmap generate a Vector of tensor image and respective class ids 
+pub fn load_split(root: &Path,class_to_id: &HashMap<String, usize>) -> Result<(Vec<Tensor<f32>>, Vec<usize>)> {
+    let mut images = Vec::new();
+    let mut labels = Vec::new();
+
+    for class_name in class_directories(root)? {
+        let Some(&class_id) = class_to_id.get(&class_name) else { return Err(DataloaderError::Image("test/train folder contains unknown class '{class_name}'".into())); };
+        let class_path = root.join(&class_name);
+        let dataset = ImageDataset::from_dir(&class_path, true)?;
+        for image in dataset.images() {
+            let (w,h) = image.dimensions();
+            images.push(image_tensor(image,w,h)?);
+            labels.push(class_id);
+        }
+    }
+    if images.is_empty() { return Err(DataloaderError::Image(format!("no images found under {}", root.display()))); }
+    Ok((images, labels))
+}
+
+/// Get all the dirs in a root dir
+pub fn class_directories(root: &Path) -> Result<Vec<String>> {
+    let mut names = fs::read_dir(root)?.filter_map(|x| x.ok()).filter_map(|entry| {
+        entry.file_type().ok().filter(|kind| kind.is_dir()).map(|_| entry.file_name().to_string_lossy().into_owned())
+    }).collect::<Vec<_>>();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() { return Err(DataloaderError::Image(format!("no class subdirectories found in {}", root.display()).into())); }
+    Ok(names)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ImageDataset {
     images: Vec<Image>,
@@ -136,6 +179,41 @@ impl ImageDataset {
         paths.dedup();
         if paths.is_empty() { return Err(DataloaderError::EmptyData); }
         Self::from_paths(paths)
+    }
+
+    /// Concat two image datasets 
+    pub fn concat(&mut self,other: ImageDataset){
+        self.images.extend(other.images);
+    }
+
+    /// Intersection of two datasets
+    pub fn intersect(&mut self,other:&Self) -> Result<Self>{
+        let s1 = self.images().iter().filter_map(|x| x.source()).collect::<HashSet<&Path>>();
+        let mut s2 = other.images().iter().filter_map(|x| x.source()).collect::<HashSet<&Path>>();
+        let mut k = s1.intersection(&mut s2).map(|x| *x).collect::<Vec<&Path>>();
+        k.sort_unstable();
+        k.dedup();
+        Self::from_paths(k)
+    }
+    
+    /// Union of two datasets
+    pub fn union(&mut self,other:&Self) -> Result<Self>{
+        let s1 = self.images().iter().filter_map(|x| x.source()).collect::<HashSet<&Path>>();
+        let mut s2 = other.images().iter().filter_map(|x| x.source()).collect::<HashSet<&Path>>();
+        let mut k = s1.union(&mut s2).map(|x| *x).collect::<Vec<&Path>>();
+        k.sort_unstable();
+        k.dedup();
+        Self::from_paths(k)
+    }
+
+    /// Difference of two datasets
+    pub fn difference(&mut self,other:&Self) -> Result<Self>{
+        let s1 = self.images().iter().filter_map(|x| x.source()).collect::<HashSet<&Path>>();
+        let mut s2 = other.images().iter().filter_map(|x| x.source()).collect::<HashSet<&Path>>();
+        let mut k = s1.difference(&mut s2).map(|x| *x).collect::<Vec<&Path>>();
+        k.sort_unstable();
+        k.dedup();
+        Self::from_paths(k)
     }
 
     pub fn from_dataframe(frame: &DataFrame,path_column: &str,pixels_column: &str) -> Result<Self> {
@@ -194,6 +272,8 @@ impl ImageDataset {
             Ok(path)
         }).collect()
     }
+
+
 }
 
 fn collect_image_paths(path: &Path, recursive: bool, output: &mut Vec<PathBuf>) -> Result<()> {

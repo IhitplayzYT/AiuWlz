@@ -374,6 +374,147 @@ pub fn where_cond<T: Element>(cond: &Tensor<T>, a: &Tensor<T>, b: &Tensor<T>, ou
     Ok(wrap(out, cc, out_shape))
 }
 
+/// CUDA NCHW/OIHW convolution forward pass.
+pub fn conv2d<T: Element>(
+    input: &Tensor<T>, weights: &Tensor<T>, bias: Option<&Tensor<T>>,
+    stride: (usize, usize), padding: (usize, usize),
+) -> Result<Tensor<T>> {
+    let x = input.compact()?;
+    let w = weights.compact()?;
+    let b = match bias {
+        Some(bias) => bias.compact()?,
+        None => Tensor::from_vec(vec![T::zero(); weights.shape()[0]], &[weights.shape()[0]])?.to_device(input.device())?,
+    };
+    let (n, c, h, width) = (x.shape()[0], x.shape()[1], x.shape()[2], x.shape()[3]);
+    let (oc, kh, kw) = (w.shape()[0], w.shape()[2], w.shape()[3]);
+    let (oh, ow) = ((h + 2 * padding.0 - kh) / stride.0 + 1, (width + 2 * padding.1 - kw) / stride.1 + 1);
+    let (cx, cw, cb) = (cstore(&x)?, cstore(&w)?, cstore(&b)?);
+    let total = n * oc * oh * ow;
+    let mut out = alloc(cx, total)?;
+    if total > 0 {
+        let f = func::<T>(&cx.dev, "conv2d_forward_k")?;
+        let mut launch = cx.dev.stream.launch_builder(&f);
+        launch.arg(&mut out).arg(&cx.data).arg(&cw.data).arg(&cb.data)
+            .arg(&n).arg(&c).arg(&h).arg(&width).arg(&oc).arg(&kh).arg(&kw)
+            .arg(&oh).arg(&ow).arg(&stride.0).arg(&stride.1).arg(&padding.0).arg(&padding.1);
+        unsafe { launch.launch(LaunchConfig::for_num_elems(total as u32)) }.map_err(cu)?;
+    }
+    Ok(wrap(out, cx, &[n, oc, oh, ow]))
+}
+
+/// CUDA gradients for NCHW/OIHW convolution: input, weight, and bias gradients.
+pub fn conv2d_backward<T: Element>(
+    input: &Tensor<T>, weights: &Tensor<T>, grad: &Tensor<T>,
+    stride: (usize, usize), padding: (usize, usize),
+) -> Result<(Tensor<T>, Tensor<T>, Tensor<T>)> {
+    let x = input.compact()?;
+    let w = weights.compact()?;
+    let g = grad.compact()?;
+    let (n, c, h, width) = (x.shape()[0], x.shape()[1], x.shape()[2], x.shape()[3]);
+    let (oc, kh, kw) = (w.shape()[0], w.shape()[2], w.shape()[3]);
+    let (oh, ow) = (g.shape()[2], g.shape()[3]);
+    let (cx, cw, cg) = (cstore(&x)?, cstore(&w)?, cstore(&g)?);
+
+    let dx_count = n * c * h * width;
+    let mut dx = alloc(cx, dx_count)?;
+    if dx_count > 0 {
+        let f = func::<T>(&cx.dev, "conv2d_dx_k")?;
+        let mut launch = cx.dev.stream.launch_builder(&f);
+        launch.arg(&mut dx).arg(&cw.data).arg(&cg.data)
+            .arg(&n).arg(&c).arg(&h).arg(&width).arg(&oc).arg(&kh).arg(&kw)
+            .arg(&oh).arg(&ow).arg(&stride.0).arg(&stride.1).arg(&padding.0).arg(&padding.1);
+        unsafe { launch.launch(LaunchConfig::for_num_elems(dx_count as u32)) }.map_err(cu)?;
+    }
+
+    let dw_count = oc * c * kh * kw;
+    let mut dw = alloc(cx, dw_count)?;
+    if dw_count > 0 {
+        let f = func::<T>(&cx.dev, "conv2d_dw_k")?;
+        let mut launch = cx.dev.stream.launch_builder(&f);
+        launch.arg(&mut dw).arg(&cx.data).arg(&cg.data)
+            .arg(&n).arg(&c).arg(&h).arg(&width).arg(&oc).arg(&kh).arg(&kw)
+            .arg(&oh).arg(&ow).arg(&stride.0).arg(&stride.1).arg(&padding.0).arg(&padding.1);
+        unsafe { launch.launch(LaunchConfig::for_num_elems(dw_count as u32)) }.map_err(cu)?;
+    }
+
+    let mut db = alloc(cx, oc)?;
+    if oc > 0 {
+        let f = func::<T>(&cx.dev, "conv2d_db_k")?;
+        let mut launch = cx.dev.stream.launch_builder(&f);
+        launch.arg(&mut db).arg(&cg.data).arg(&n).arg(&oc).arg(&oh).arg(&ow);
+        unsafe { launch.launch(LaunchConfig::for_num_elems(oc as u32)) }.map_err(cu)?;
+    }
+    Ok((wrap(dx, cx, &[n, c, h, width]), wrap(dw, cw, w.shape()), wrap(db, cw, &[1, oc, 1, 1])))
+}
+
+/// CUDA transposed convolution forward pass with IOHW weights.
+pub fn conv_transpose2d<T: Element>(
+    input: &Tensor<T>, weights: &Tensor<T>, stride: (usize, usize), padding: (usize, usize),
+) -> Result<Tensor<T>> {
+    let x = input.compact()?;
+    let w = weights.compact()?;
+    let (n, ic, h, width) = (x.shape()[0], x.shape()[1], x.shape()[2], x.shape()[3]);
+    let (oc, kh, kw) = (w.shape()[1], w.shape()[2], w.shape()[3]);
+    let (oh, ow) = ((h - 1) * stride.0 + kh - 2 * padding.0, (width - 1) * stride.1 + kw - 2 * padding.1);
+    let (cx, cw) = (cstore(&x)?, cstore(&w)?);
+    let total = n * oc * oh * ow;
+    let mut out = alloc(cx, total)?;
+    if total > 0 {
+        let f = func::<T>(&cx.dev, "conv_transpose2d_forward_k")?;
+        let mut launch = cx.dev.stream.launch_builder(&f);
+        launch.arg(&mut out).arg(&cx.data).arg(&cw.data)
+            .arg(&n).arg(&ic).arg(&h).arg(&width).arg(&oc).arg(&kh).arg(&kw)
+            .arg(&oh).arg(&ow).arg(&stride.0).arg(&stride.1).arg(&padding.0).arg(&padding.1);
+        unsafe { launch.launch(LaunchConfig::for_num_elems(total as u32)) }.map_err(cu)?;
+    }
+    Ok(wrap(out, cx, &[n, oc, oh, ow]))
+}
+
+/// CUDA gradients for transposed convolution: input, weight, and output-bias gradients.
+pub fn conv_transpose2d_backward<T: Element>(
+    input: &Tensor<T>, weights: &Tensor<T>, grad: &Tensor<T>,
+    stride: (usize, usize), padding: (usize, usize),
+) -> Result<(Tensor<T>, Tensor<T>, Tensor<T>)> {
+    let x = input.compact()?;
+    let w = weights.compact()?;
+    let g = grad.compact()?;
+    let (n, ic, h, width) = (x.shape()[0], x.shape()[1], x.shape()[2], x.shape()[3]);
+    let (oc, kh, kw) = (w.shape()[1], w.shape()[2], w.shape()[3]);
+    let (oh, ow) = (g.shape()[2], g.shape()[3]);
+    let (cx, cw, cg) = (cstore(&x)?, cstore(&w)?, cstore(&g)?);
+
+    let dx_count = n * ic * h * width;
+    let mut dx = alloc(cx, dx_count)?;
+    if dx_count > 0 {
+        let f = func::<T>(&cx.dev, "conv_transpose2d_dx_k")?;
+        let mut launch = cx.dev.stream.launch_builder(&f);
+        launch.arg(&mut dx).arg(&cw.data).arg(&cg.data)
+            .arg(&n).arg(&ic).arg(&h).arg(&width).arg(&oc).arg(&kh).arg(&kw)
+            .arg(&oh).arg(&ow).arg(&stride.0).arg(&stride.1).arg(&padding.0).arg(&padding.1);
+        unsafe { launch.launch(LaunchConfig::for_num_elems(dx_count as u32)) }.map_err(cu)?;
+    }
+
+    let dw_count = ic * oc * kh * kw;
+    let mut dw = alloc(cx, dw_count)?;
+    if dw_count > 0 {
+        let f = func::<T>(&cx.dev, "conv_transpose2d_dw_k")?;
+        let mut launch = cx.dev.stream.launch_builder(&f);
+        launch.arg(&mut dw).arg(&cx.data).arg(&cg.data)
+            .arg(&n).arg(&ic).arg(&h).arg(&width).arg(&oc).arg(&kh).arg(&kw)
+            .arg(&oh).arg(&ow).arg(&stride.0).arg(&stride.1).arg(&padding.0).arg(&padding.1);
+        unsafe { launch.launch(LaunchConfig::for_num_elems(dw_count as u32)) }.map_err(cu)?;
+    }
+
+    let mut db = alloc(cx, oc)?;
+    if oc > 0 {
+        let f = func::<T>(&cx.dev, "conv_transpose2d_db_k")?;
+        let mut launch = cx.dev.stream.launch_builder(&f);
+        launch.arg(&mut db).arg(&cg.data).arg(&n).arg(&oc).arg(&oh).arg(&ow);
+        unsafe { launch.launch(LaunchConfig::for_num_elems(oc as u32)) }.map_err(cu)?;
+    }
+    Ok((wrap(dx, cx, &[n, ic, h, width]), wrap(dw, cw, w.shape()), wrap(db, cw, &[1, oc, 1, 1])))
+}
+
 pub fn scalar_op<T: Element>(t: &Tensor<T>, scalar: T, op: i32) -> Result<Tensor<T>> {
     let t = t.compact()?;
     let c = cstore(&t)?;

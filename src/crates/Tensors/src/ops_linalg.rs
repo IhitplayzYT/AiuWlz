@@ -23,6 +23,10 @@ impl<T: Element> Tensor<T> {
         if kh == 0 || kw == 0 || h + 2 * padding.0 < kh || w + 2 * padding.1 < kw { return Err(TensorError::InvalidShape("Conv2d kernel doesnt fit padded input".into())); }
         if let Some(b) = bias { if b.numel() != oc { return Err(TensorError::ShapeMismatch { op: "conv2d bias", lhs: vec![oc], rhs: b.shape().to_vec() }); } }
         let (oh, ow) = ((h + 2 * padding.0 - kh) / stride.0 + 1, (w + 2 * padding.1 - kw) / stride.1 + 1);
+        #[cfg(feature = "cuda")]
+        if matches!(&*self.storage, Storage::Cuda(_)) {
+            return crate::cuda::conv2d(self, weight, bias, stride, padding);
+        }
         self.via_host(|x| {
             let xv = x.compact()?.to_vec()?;
             let wv = weight.cpu()?.compact()?.to_vec()?;
@@ -60,6 +64,10 @@ impl<T: Element> Tensor<T> {
         let ow = (w - 1) * stride.1 + kw;
         if 2 * padding.0 >= oh || 2 * padding.1 >= ow { return Err(TensorError::InvalidShape("ConvTranspose2d padding removes the output".into())); }
         let (oh,ow) = (oh - 2 * padding.0,ow - 2 * padding.1);
+        #[cfg(feature = "cuda")]
+        if matches!(&*self.storage, Storage::Cuda(_)) {
+            return crate::cuda::conv_transpose2d(self, weight, stride, padding);
+        }
         self.via_host(|x| {
             let xv = x.compact()?.to_vec()?;
             let wv = weight.cpu()?.compact()?.to_vec()?;
@@ -97,6 +105,10 @@ impl<T: Element> Tensor<T> {
         if h == 0 || w == 0 || kh == 0 || kw == 0 { return Err(TensorError::InvalidShape("ConvTranspose2d backward expects nonempty spatial dimensions".into())); }
         let (oh,ow) = ((h - 1) * stride.0 + kh - 2 * padding.0,(w - 1) * stride.1 + kw - 2 * padding.1);
         if ic != wc || output_gradient.shape() != [n,oc,oh,ow] { return Err(TensorError::ShapeMismatch {op: "ConvTranspose2d backward gradient",lhs: vec![n,oc,oh,ow],rhs: output_gradient.shape().to_vec()}); }
+        #[cfg(feature = "cuda")]
+        if matches!(&*self.storage, Storage::Cuda(_)) {
+            return crate::cuda::conv_transpose2d_backward(self, weight, output_gradient, stride, padding);
+        }
         let xv = self.cpu()?.compact()?.to_vec()?;
         let wv = weight.cpu()?.compact()?.to_vec()?;
         let gv = output_gradient.cpu()?.compact()?.to_vec()?;
@@ -151,6 +163,10 @@ impl<T: Element> Tensor<T> {
         if c != wc || h + 2 * padding.0 < kh || w + 2 * padding.1 < kw { return Err(TensorError::ShapeMismatch { op: "Conv2d_backward", lhs: self.shape().to_vec(), rhs: weight.shape().to_vec() }); }
         let (oh, ow) = ((h + 2 * padding.0 - kh) / stride.0 + 1, (w + 2 * padding.1 - kw) / stride.1 + 1);
         if output_gradient.shape() != [n, oc, oh, ow] { return Err(TensorError::ShapeMismatch { op: "Conv2d_backward gradient", lhs: vec![n, oc, oh, ow], rhs: output_gradient.shape().to_vec() }); }
+        #[cfg(feature = "cuda")]
+        if matches!(&*self.storage, Storage::Cuda(_)) {
+            return crate::cuda::conv2d_backward(self, weight, output_gradient, stride, padding);
+        }
         let xv = self.cpu()?.compact()?.to_vec()?;
         let wv = weight.cpu()?.compact()?.to_vec()?;
         let gv = output_gradient.cpu()?.compact()?.to_vec()?;
@@ -217,22 +233,32 @@ impl<T: Element> Tensor<T> {
         });
         let vals = pairs.iter().map(|x| x.0).collect();
         let idxes = pairs.into_iter().map(|x| x.1).collect();
-        Ok((Tensor::from_vec(vals, &[n, c, oh, ow])?.to_device(self.device())?, Tensor::from_vec(idxes, &[n, c, oh, ow])?.to_device(self.device())?))
+        // Pool indices are i64, which this CUDA backend does not support as a device tensor.
+        // Keep indices on CPU; max_pool2d_backward copies them to host before using them.
+        Ok((
+            Tensor::from_vec(vals, &[n, c, oh, ow])?.to_device(self.device())?,
+            Tensor::from_vec(idxes, &[n, c, oh, ow])?,
+        ))
     }
 
     /// Build sparce_mat with the only the idxs with max in kernel superimposed mat be set to the max
     pub fn max_pool2d_backward(&self, indices: &Tensor<i64>, output_gradient: &Self, kernel: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> TensorResult<Self> {
         self.same_device(output_gradient)?;
-        if indices.device() != self.device() { return Err(TensorError::DeviceMismatch { lhs: self.device(), rhs: indices.device() }); }
         let (n, c, h, w, oh, ow) = pool2d_shape(self.shape(), kernel, stride, padding)?;
         if indices.shape() != [n, c, oh, ow] || output_gradient.shape() != [n, c, oh, ow] { return Err(TensorError::ShapeMismatch { op: "max_pool2d_backward", lhs: vec![n, c, oh, ow], rhs: output_gradient.shape().to_vec() }); }
         let mx_idxs = indices.cpu()?.to_vec()?;
         let grads = output_gradient.cpu()?.compact()?.to_vec()?;
-        let dx = par::map_range(n * c * h * w, |i| {
-            let mut sum = T::zero();
-            for (j, &winner) in mx_idxs.iter().enumerate() { if winner == i as i64 { sum += grads[j]; } }
-            sum
-        });
+        // Scatter each pooled gradient to its winning input. The previous implementation
+        // searched every winner for every input element, which made backward quadratic.
+        let mut dx = vec![T::zero(); n * c * h * w];
+        for (&winner, &gradient) in mx_idxs.iter().zip(&grads) {
+            if winner >= 0 {
+                let winner = winner as usize;
+                if winner < dx.len() {
+                    dx[winner] += gradient;
+                }
+            }
+        }
         Tensor::from_vec(dx, &[n, c, h, w])?.to_device(self.device())
     }
 
